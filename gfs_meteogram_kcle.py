@@ -84,6 +84,8 @@ def build_gfs_url(run_date: dt.date, cycle: int, f_hour: int) -> str:
         "var_UGRD": "on",
         "var_VGRD": "on",
         "var_APCP": "on",
+        "var_PRMSL": "on",
+        "var_GUST": "on",
         # subregion
         "subregion": "",
         "leftlon": str(LON_LEFT),
@@ -274,57 +276,92 @@ class GFSPointForecast(PointModelForecast):
 
     def to_dataframe(self) -> pd.DataFrame:
         records = []
+
         for fh in self.fhours:
             path = self.work_dir / f"gfs.t{self.cycle:02d}z.f{fh:03d}.grib2"
             if not path.exists():
                 raise FileNotFoundError(f"Missing GRIB file: {path}. Run fetch() first.")
 
-            ds = xr.open_dataset(path, engine="cfgrib")
-            lat_name, lon_name = get_coord_names(ds)
-            pt = ds.sel({lat_name: self.lat, lon_name: self.lon}, method="nearest")
-            ds_pt = pt.to_dataset()
+            # --- Load primarily surface-level fields ---
+            ds_sfc = xr.open_dataset(
+                path,
+                engine="cfgrib",
+                backend_kwargs={"filter_by_keys": {"typeOfLevel": "surface"}},
+            )
+            lat_name, lon_name = get_coord_names(ds_sfc)
+            pt_sfc = ds_sfc.sel({lat_name: self.lat, lon_name: self.lon}, method="nearest")
 
-            t2m = select_var(ds_pt, ["t2m", "2t", "TMP_2maboveground"])
-            d2m = ds_pt.data_vars.get("d2m", None)
-            if d2m is None:
-                try:
-                    d2m = select_var(ds_pt, ["DPT_2maboveground"])
-                except KeyError:
-                    d2m = None
-            spfh2m = ds_pt.data_vars.get("SPFH_2maboveground", None)
-            u10 = select_var(ds_pt, ["u10", "UGRD_10maboveground"])
-            v10 = select_var(ds_pt, ["v10", "VGRD_10maboveground"])
-            apcp = select_var(ds_pt, ["tp", "prate", "apcp", "APCP_surface"])
+            # --- Temperature: surface first, fall back to 2 m if needed ---
+            try:
+                t = select_var(pt_sfc, ["TMP_surface"])
+                temp_k = float(t.values)
+            except KeyError:
+                # fallback: 2 m above ground
+                ds_2m = xr.open_dataset(
+                    path,
+                    engine="cfgrib",
+                    backend_kwargs={"filter_by_keys": {"typeOfLevel": "heightAboveGround", "level": 2}},
+                )
+                lat2, lon2 = get_coord_names(ds_2m)
+                pt_2m = ds_2m.sel({lat2: self.lat, lon2: self.lon}, method="nearest")
+                t = select_var(pt_2m, ["t2m", "2t", "TMP_2maboveground"])
+                temp_k = float(t.values)
 
-            time = pt["time"]
-            if "step" in pt.coords:
-                valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(pt["step"].values)).item()
-            else:
-                valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(fh, "h")).to_pydatetime()
-
-            temp_k = float(t2m.values)
             temp_c = temp_k - 273.15
 
-            if d2m is not None:
-                dew_k = float(d2m.values)
-                dew_c = dew_k - 273.15
-                rh = rh_from_t_td(np.array([temp_c]), np.array([dew_c]))[0]
-            elif spfh2m is not None:
-                spfh = float(spfh2m.values)
+            # --- Dewpoint / RH: SPFH_surface if available ---
+            try:
+                spfh = float(select_var(pt_sfc, ["SPFH_surface", "SPFH"]).values)
                 dew_c = float(dewpoint_from_spfh(np.array([temp_c]), np.array([spfh]))[0])
                 rh = rh_from_t_td(np.array([temp_c]), np.array([dew_c]))[0]
-            else:
+            except KeyError:
                 dew_c = np.nan
                 rh = np.nan
 
-            u = float(u10.values)
-            v = float(v10.values)
+            # --- Wind: surface U/V (treat as 10 m equivalent for plotting) ---
+            try:
+                u = float(select_var(pt_sfc, ["UGRD_surface", "UGRD"]).values)
+                v = float(select_var(pt_sfc, ["VGRD_surface", "VGRD"]).values)
+            except KeyError:
+                u = 0.0
+                v = 0.0
+
             wind_ms = float(np.hypot(u, v))
             wind_mph = wind_ms * 2.23694
 
-            # APCP is typically accumulated; keep raw for now and convert later
+            # --- Wind gusts (if present) ---
+            try:
+                gust = float(select_var(pt_sfc, ["GUST_surface", "GUST"]).values)
+                gust_mph = gust * 2.23694
+            except KeyError:
+                gust_mph = np.nan
+
+            # --- Precipitation: accumulated APCP at surface ---
+            apcp = select_var(pt_sfc, ["APCP_surface", "apcp", "tp"])
             qpf_mm = float(apcp.values)
             qpf_in_raw = qpf_mm / 25.4
+
+            # --- Mean Sea Level Pressure (if present) ---
+            try:
+                prmsl = select_var(pt_sfc, ["PRMSL", "PRMSL_meansealevel"])
+                # PRMSL is usually in Pa; convert to hPa if so
+                pr_val = float(prmsl.values)
+                mslp_hpa = pr_val / 100.0 if pr_val > 2000.0 else pr_val
+            except KeyError:
+                mslp_hpa = np.nan
+
+            # --- Valid time from GRIB time/step ---
+            time = pt_sfc["time"]
+            if "step" in pt_sfc.coords:
+                valid_time = (
+                    pd.to_datetime(time.values)
+                    + pd.to_timedelta(pt_sfc["step"].values)
+                ).item()
+            else:
+                valid_time = (
+                    pd.to_datetime(time.values)
+                    + pd.to_timedelta(fh, "h")
+                ).to_pydatetime()
 
             records.append(
                 {
@@ -337,25 +374,34 @@ class GFSPointForecast(PointModelForecast):
                     "qpf_in_raw": qpf_in_raw,
                     "wind10m_ms": wind_ms,
                     "wind10m_mph": wind_mph,
+                    "gust_mph": gust_mph,
+                    "mslp_hpa": mslp_hpa,
                 }
             )
 
+        # --- Post-processing into a full timeseries ---
         df = pd.DataFrame.from_records(records).sort_values("valid_time").reset_index(drop=True)
 
+        # Convert accumulated APCP to per-period QPF
         df["qpf_in"] = df["qpf_in_raw"].diff().clip(lower=0.0)
         df.loc[df["qpf_in"].isna(), "qpf_in"] = df.loc[df["qpf_in"].isna(), "qpf_in_raw"]
 
         precip_type = classify_precip_type(df["temp_c"].values, df["qpf_in"].values)
         df["precip_type"] = precip_type
 
-        snowfall, snow_acc = compute_snowfall_and_compaction(df["qpf_in"].values, df["temp_c"].values, precip_type)
+        snowfall, snow_acc = compute_snowfall_and_compaction(
+            df["qpf_in"].values, df["temp_c"].values, precip_type
+        )
         df["snowfall_in"] = snowfall
         df["snow_acc_in"] = snow_acc
 
-        df["apparent_temp_f"] = apparent_temperature_f(df["temp_f"].values, df["wind10m_mph"].values, df["rh_percent"].fillna(0).values)
+        df["apparent_temp_f"] = apparent_temperature_f(
+            df["temp_f"].values,
+            df["wind10m_mph"].values,
+            df["rh_percent"].fillna(0).values,
+        )
 
         return df
-
 
 # ---------------------------------------------------------------------------
 # Plotting
@@ -370,7 +416,10 @@ def plot_meteogram(model_dfs: dict[str, pd.DataFrame], location_label: str, run_
     model_name, df = next(iter(model_dfs.items()))
     times = df["valid_time"]
 
-    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True, constrained_layout=True)
+    has_mslp = "mslp_hpa" in df.columns and df["mslp_hpa"].notna().any()
+    n_panels = 5 if has_mslp else 4
+
+    fig, axes = plt.subplots(n_panels, 1, figsize=(12, 3 * n_panels), sharex=True, constrained_layout=True)
 
     # Panel 1: Temperature and apparent temperature
     ax1 = axes[0]
@@ -402,13 +451,23 @@ def plot_meteogram(model_dfs: dict[str, pd.DataFrame], location_label: str, run_
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc="upper left")
 
-    # Panel 4: Wind
-    ax4 = axes[3]
-    ax4.plot(times, df["wind10m_mph"], color="tab:green", label="10 m Wind (mph)")
-    ax4.fill_between(times, 25, df["wind10m_mph"], where=df["wind10m_mph"] >= 25, color="orange", alpha=0.2, step="mid")
-    ax4.set_ylabel("Wind (mph)")
-    ax4.grid(True, alpha=0.3)
-    ax4.legend(loc="upper left")
+    # Panel 4: Wind (and gusts if available)
+    ax_wind = axes[3]
+    ax_wind.plot(times, df["wind10m_mph"], color="tab:green", label="Wind (mph)")
+    if "gust_mph" in df.columns and df["gust_mph"].notna().any():
+        ax_wind.plot(times, df["gust_mph"], color="tab:olive", linestyle="--", label="Gust (mph)")
+    ax_wind.fill_between(times, 25, df["wind10m_mph"], where=df["wind10m_mph"] >= 25, color="orange", alpha=0.2, step="mid")
+    ax_wind.set_ylabel("Wind (mph)")
+    ax_wind.grid(True, alpha=0.3)
+    ax_wind.legend(loc="upper left")
+
+    # Optional Panel 5: Mean Sea Level Pressure
+    if has_mslp:
+        ax_p = axes[4]
+        ax_p.plot(times, df["mslp_hpa"], color="tab:brown", label="MSLP (hPa)")
+        ax_p.set_ylabel("MSLP (hPa)")
+        ax_p.grid(True, alpha=0.3)
+        ax_p.legend(loc="upper left")
 
     fig.autofmt_xdate()
     fig.suptitle(f"{model_name} Meteogram – {location_label} – {run_label}", fontsize=14)
