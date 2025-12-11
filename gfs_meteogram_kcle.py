@@ -335,9 +335,12 @@ class GFSPointForecast(PointModelForecast):
                 gust_mph = np.nan
 
             # --- Precipitation: accumulated APCP at surface ---
-            apcp = select_var(pt_sfc, ["APCP_surface", "apcp", "tp"])
-            qpf_mm = float(apcp.values)
-            qpf_in_raw = qpf_mm / 25.4
+            try:
+                apcp = select_var(pt_sfc, ["APCP_surface", "apcp", "tp"])
+                qpf_mm = float(apcp.values)
+                qpf_in_raw = qpf_mm / 25.4
+            except KeyError:
+                qpf_in_raw = 0.0
 
             # --- Mean Sea Level Pressure (if present) ---
             try:
