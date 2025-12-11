@@ -1,40 +1,35 @@
 #!/usr/bin/env python3
 """
-Phase 1: GFS-only meteogram for KCLE (Cleveland).
+Multi-panel meteogram for a single point using GFS 0.25° data.
 
-What it does:
-- Figures out today's UTC date & a recent GFS cycle (00/06/12/18).
-- Downloads GFS 0.25° TMP(2 m) + APCP(sfc) around KCLE via NOMADS grib filter.
-- Extracts nearest gridpoint to KCLE.
-- Computes:
-    * 6-hourly precip ("QPF")
-    * Approx snowfall (using temp-dependent snow ratio)
-    * Accumulated snow with a simple compaction/melt model
-- Produces a 3-panel meteogram PNG: snow / precip / temp.
+Features
+--------
+* Downloads a small subset of GFS using the NOMADS grib-filter API.
+* Extracts the nearest grid point to a requested lat/lon.
+* Builds a pandas DataFrame with temperature, dewpoint/humidity, QPF,
+  snowfall with compaction, wind, and apparent temperature.
+* Produces a multi-panel meteogram PNG (and optional CSV) for easy review.
 
-You can override date/cycle/hours via CLI args.
+This module is structured around a model class so additional point
+forecast sources can be plugged in later.
 """
 
 import argparse
 import datetime as dt
-import os
 from pathlib import Path
+from typing import Iterable, Protocol
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
 import xarray as xr
-import matplotlib.pyplot as plt
-
-# ------------------------------
-# Config
-# ------------------------------
 
 BASE_URL = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
 
-# Rough KCLE coordinates
-KCLE_LAT = 41.48
-KCLE_LON = -81.81
+# Default KCLE coordinates
+DEFAULT_LAT = 41.48
+DEFAULT_LON = -81.81
 
 # Small lat/lon box around KCLE for the grib filter (degrees)
 LAT_TOP = 43.0
@@ -43,14 +38,26 @@ LON_LEFT = -84.0
 LON_RIGHT = -79.0
 
 
-# ------------------------------
+class PointModelForecast(Protocol):
+    def fetch(self, *, no_cache: bool = False) -> None:
+        ...
+
+    def to_dataframe(self) -> pd.DataFrame:
+        ...
+
+    @property
+    def model_name(self) -> str:
+        ...
+
+
+# ---------------------------------------------------------------------------
 # Utility functions
-# ------------------------------
+# ---------------------------------------------------------------------------
+
 
 def choose_default_cycle(now_utc: dt.datetime) -> int:
-    """
-    Choose most recent GFS cycle (0, 6, 12, 18 UTC) at or before current UTC.
-    """
+    """Choose most recent GFS cycle (0, 6, 12, 18 UTC) at or before current UTC."""
+
     for c in [18, 12, 6, 0]:
         if now_utc.hour >= c:
             return c
@@ -59,17 +66,23 @@ def choose_default_cycle(now_utc: dt.datetime) -> int:
 
 def build_gfs_url(run_date: dt.date, cycle: int, f_hour: int) -> str:
     """
-    Build the NOMADS grib-filter URL for GFS 0.25° with 2m temp + APCP.
+    Build the NOMADS grib-filter URL for GFS 0.25° with required variables.
     """
+
     ymd = run_date.strftime("%Y%m%d")
     file_name = f"gfs.t{cycle:02d}z.pgrb2.0p25.f{f_hour:03d}"
 
     params = {
         "file": file_name,
-        # vars
+        # variables
         "lev_2_m_above_ground": "on",
+        "lev_10_m_above_ground": "on",
         "lev_surface": "on",
         "var_TMP": "on",
+        "var_DPT": "on",
+        "var_SPFH": "on",
+        "var_UGRD": "on",
+        "var_VGRD": "on",
         "var_APCP": "on",
         # subregion
         "subregion": "",
@@ -81,15 +94,13 @@ def build_gfs_url(run_date: dt.date, cycle: int, f_hour: int) -> str:
         "dir": f"/gfs.{ymd}/{cycle:02d}/atmos",
     }
 
-    # requests will handle the querystring encoding
     return requests.Request("GET", BASE_URL, params=params).prepare().url
 
 
-def download_grib_if_needed(url: str, out_path: Path) -> None:
-    """
-    Download the GRIB file at url to out_path if it doesn't exist.
-    """
-    if out_path.exists():
+def download_grib(url: str, out_path: Path, *, no_cache: bool = False) -> None:
+    """Download the GRIB file at url to out_path."""
+
+    if out_path.exists() and not no_cache:
         print(f"[download] Using cached {out_path.name}")
         return
 
@@ -100,9 +111,8 @@ def download_grib_if_needed(url: str, out_path: Path) -> None:
 
 
 def get_coord_names(ds: xr.Dataset):
-    """
-    Try to find the latitude/longitude coordinate names in a cfgrib dataset.
-    """
+    """Find the latitude/longitude coordinate names in a cfgrib dataset."""
+
     if "latitude" in ds.coords:
         lat_name = "latitude"
     elif "lat" in ds.coords:
@@ -120,11 +130,9 @@ def get_coord_names(ds: xr.Dataset):
     return lat_name, lon_name
 
 
-def select_var(ds: xr.Dataset, candidates):
-    """
-    Pick the first variable name in 'candidates' that exists in ds.
-    This gives us some robustness across slightly different naming conventions.
-    """
+def select_var(ds: xr.Dataset, candidates: Iterable[str]):
+    """Pick the first variable name in 'candidates' that exists in ds."""
+
     for name in candidates:
         if name in ds.data_vars:
             return ds[name]
@@ -135,41 +143,89 @@ def c_to_f(temp_c: np.ndarray) -> np.ndarray:
     return temp_c * 9.0 / 5.0 + 32.0
 
 
-def simple_snow_ratio(temp_c: float) -> float:
-    """
-    Very simple temp-dependent snow ratio (snow:water).
-    """
-    if temp_c <= -10.0:
-        return 20.0
-    if temp_c <= -5.0:
-        return 15.0
-    if temp_c <= 0.0:
-        return 10.0
-    if temp_c <= 1.0:
-        return 8.0
-    return 0.0  # treat as rain
+def rh_from_t_td(t_c: np.ndarray, td_c: np.ndarray) -> np.ndarray:
+    es = 6.112 * np.exp((17.67 * t_c) / (t_c + 243.5))
+    e = 6.112 * np.exp((17.67 * td_c) / (td_c + 243.5))
+    return 100.0 * e / es
 
 
-def compute_snow_and_compaction(qpf: np.ndarray, temp_c: np.ndarray):
-    """
-    Given per-period QPF (inches) and temp (°C), compute:
-      - snowfall per period (inches)
-      - accumulated snow depth with crude compaction (inches)
-    """
-    snowfall = np.zeros_like(qpf)
-    snow_acc = np.zeros_like(qpf)
+def dewpoint_from_spfh(temp_c: np.ndarray, spfh: np.ndarray, pressure_hpa: float = 1013.0) -> np.ndarray:
+    """Approximate dewpoint (°C) from specific humidity (kg/kg) and pressure."""
 
+    epsilon = 0.622
+    w = spfh / (1.0 - spfh)  # mixing ratio
+    e = pressure_hpa * w / (w + epsilon)  # vapor pressure in hPa
+    ln_ratio = np.log(e / 6.112)
+    td_c = (243.5 * ln_ratio) / (17.67 - ln_ratio)
+    return td_c
+
+
+def apparent_temperature_f(temp_f: np.ndarray, wind_mph: np.ndarray, rh_percent: np.ndarray) -> np.ndarray:
+    """
+    Combine wind chill and heat index into a single "feels like" temperature.
+    - When temp <= 50°F and wind >= 3 mph → Wind Chill
+    - When temp >= 80°F → Heat Index
+    - Otherwise → temp itself
+    """
+
+    temp_f = np.asarray(temp_f)
+    wind_mph = np.asarray(wind_mph)
+    rh_percent = np.asarray(rh_percent)
+
+    # Wind chill
+    wind_chill = 35.74 + 0.6215 * temp_f - 35.75 * np.power(wind_mph, 0.16) + 0.4275 * temp_f * np.power(wind_mph, 0.16)
+    wind_chill_mask = (temp_f <= 50.0) & (wind_mph >= 3.0)
+
+    # Heat index (Rothfusz)
+    hi = (
+        -42.379
+        + 2.04901523 * temp_f
+        + 10.14333127 * rh_percent
+        - 0.22475541 * temp_f * rh_percent
+        - 6.83783e-3 * temp_f**2
+        - 5.481717e-2 * rh_percent**2
+        + 1.22874e-3 * temp_f**2 * rh_percent
+        + 8.5282e-4 * temp_f * rh_percent**2
+        - 1.99e-6 * temp_f**2 * rh_percent**2
+    )
+    heat_index_mask = temp_f >= 80.0
+
+    feels_like = temp_f.copy()
+    feels_like = np.where(wind_chill_mask, wind_chill, feels_like)
+    feels_like = np.where(heat_index_mask, hi, feels_like)
+    return feels_like
+
+
+def compute_snowfall_and_compaction(qpf_in: np.ndarray, temp_c: np.ndarray, precip_type: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute snowfall per period and compacted accumulation.
+    - Only create snow where precip_type is snow or mix.
+    - Snow ratio scales with temperature.
+    - Simple temperature-dependent compaction.
+    """
+
+    snowfall = np.zeros_like(qpf_in)
+    snow_acc = np.zeros_like(qpf_in)
     depth = 0.0
-    for i, (p, t) in enumerate(zip(qpf, temp_c)):
-        if p > 0:
-            r = simple_snow_ratio(t)
-            snowfall[i] = p * r
+
+    for i, (qpf, t, ptype) in enumerate(zip(qpf_in, temp_c, precip_type)):
+        if ptype in {"snow", "mix"} and qpf > 0:
+            if ptype == "mix":
+                ratio = 5.0
+            elif t <= -5.0:
+                ratio = 15.0
+            elif t <= 0.0:
+                ratio = 12.0
+            else:
+                ratio = 10.0
+            snowfall[i] = qpf * ratio
         else:
             snowfall[i] = 0.0
 
-        # compaction / melting when above freezing
         if t > 0.0:
-            depth *= 0.96  # lose 4% per period above freezing
+            depth *= 0.95  # melt/settle faster above freezing
+        else:
+            depth *= 0.985  # light settling below freezing
 
         depth += snowfall[i]
         snow_acc[i] = depth
@@ -177,164 +233,226 @@ def compute_snow_and_compaction(qpf: np.ndarray, temp_c: np.ndarray):
     return snowfall, snow_acc
 
 
-# ------------------------------
-# Core processing
-# ------------------------------
-
-def build_timeseries(run_date: dt.date, cycle: int, hours, work_dir: Path):
-    """
-    Download GFS files for the specified forecast hours and build a time series
-    at KCLE for temp + QPF + snow + compacted snow.
-
-    Returns a pandas DataFrame.
-    """
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    records = []
-
-    for f_hour in hours:
-        url = build_gfs_url(run_date, cycle, f_hour)
-        out_path = work_dir / f"gfs.t{cycle:02d}z.f{f_hour:03d}.grib2"
-        download_grib_if_needed(url, out_path)
-
-        # Open with cfgrib
-        ds = xr.open_dataset(out_path, engine="cfgrib")
-
-        lat_name, lon_name = get_coord_names(ds)
-        pt = ds.sel(
-            {lat_name: KCLE_LAT, lon_name: KCLE_LON},
-            method="nearest"
-        )
-
-        # Guess variable names
-        t2m = select_var(pt.to_dataset(), ["t2m", "2t", "TMP_2maboveground"])
-        apcp = select_var(pt.to_dataset(), ["tp", "prate", "apcp", "APCP_surface"])
-
-        # Time: valid time = analysis time + step (forecast lead)
-        time = pt["time"]
-        if "step" in pt.coords:
-            step = pt["step"]
-            valid_time = (time + step).values
+def classify_precip_type(temp_c: np.ndarray, qpf_in: np.ndarray) -> np.ndarray:
+    precip = []
+    for t, q in zip(temp_c, qpf_in):
+        if q == 0:
+            precip.append("none")
+        elif t <= 0.5:
+            precip.append("snow")
+        elif t <= 2.0:
+            precip.append("mix")
         else:
-            # Fallback: just add f_hour hours
-            valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(f_hour, "h"))
-
-        temp_k = float(t2m.values)  # Kelvin
-        temp_c = temp_k - 273.15
-
-        # APCP units are usually kg/m^2 (mm of water). Convert to inches.
-        qpf_mm = float(apcp.values)
-        qpf_in = qpf_mm / 25.4
-
-        records.append(
-            {
-                "valid_time": pd.to_datetime(valid_time),
-                "f_hour": f_hour,
-                "temp_c": temp_c,
-                "qpf_in_raw": qpf_in,
-            }
-        )
-
-    df = pd.DataFrame.from_records(records).sort_values("valid_time")
-
-    # IMPORTANT: For many GFS APCP fields, values are per-interval already.
-    # If you discover they are "since model start", uncomment this diff:
-    # df["qpf_in"] = df["qpf_in_raw"].diff().clip(lower=0.0).fillna(df["qpf_in_raw"])
-    df["qpf_in"] = df["qpf_in_raw"]
-
-    snowfall, snow_acc = compute_snow_and_compaction(
-        df["qpf_in"].values, df["temp_c"].values
-    )
-
-    df["snowfall_in"] = snowfall
-    df["snow_acc_in"] = snow_acc
-    df["temp_f"] = c_to_f(df["temp_c"].values)
-
-    return df
+            precip.append("rain")
+    return np.array(precip, dtype=object)
 
 
-def plot_meteogram(df: pd.DataFrame, title_suffix: str, out_path: Path):
-    """
-    Make a 3-panel meteogram: accumulated snow, QPF, 2m temperature.
-    """
+# ---------------------------------------------------------------------------
+# GFS implementation
+# ---------------------------------------------------------------------------
+
+
+class GFSPointForecast(PointModelForecast):
+    def __init__(self, run_date: dt.date, cycle: int, lat: float, lon: float, fhours: list[int], work_dir: Path):
+        self.run_date = run_date
+        self.cycle = cycle
+        self.lat = lat
+        self.lon = lon
+        self.fhours = fhours
+        self.work_dir = work_dir
+
+    @property
+    def model_name(self) -> str:  # pragma: no cover - trivial
+        return "GFS"
+
+    def fetch(self, *, no_cache: bool = False) -> None:
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        for fh in self.fhours:
+            url = build_gfs_url(self.run_date, self.cycle, fh)
+            out_path = self.work_dir / f"gfs.t{self.cycle:02d}z.f{fh:03d}.grib2"
+            download_grib(url, out_path, no_cache=no_cache)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        records = []
+        for fh in self.fhours:
+            path = self.work_dir / f"gfs.t{self.cycle:02d}z.f{fh:03d}.grib2"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing GRIB file: {path}. Run fetch() first.")
+
+            ds = xr.open_dataset(path, engine="cfgrib")
+            lat_name, lon_name = get_coord_names(ds)
+            pt = ds.sel({lat_name: self.lat, lon_name: self.lon}, method="nearest")
+            ds_pt = pt.to_dataset()
+
+            t2m = select_var(ds_pt, ["t2m", "2t", "TMP_2maboveground"])
+            d2m = ds_pt.data_vars.get("d2m", None)
+            if d2m is None:
+                try:
+                    d2m = select_var(ds_pt, ["DPT_2maboveground"])
+                except KeyError:
+                    d2m = None
+            spfh2m = ds_pt.data_vars.get("SPFH_2maboveground", None)
+            u10 = select_var(ds_pt, ["u10", "UGRD_10maboveground"])
+            v10 = select_var(ds_pt, ["v10", "VGRD_10maboveground"])
+            apcp = select_var(ds_pt, ["tp", "prate", "apcp", "APCP_surface"])
+
+            time = pt["time"]
+            if "step" in pt.coords:
+                valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(pt["step"].values)).item()
+            else:
+                valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(fh, "h")).to_pydatetime()
+
+            temp_k = float(t2m.values)
+            temp_c = temp_k - 273.15
+
+            if d2m is not None:
+                dew_k = float(d2m.values)
+                dew_c = dew_k - 273.15
+                rh = rh_from_t_td(np.array([temp_c]), np.array([dew_c]))[0]
+            elif spfh2m is not None:
+                spfh = float(spfh2m.values)
+                dew_c = float(dewpoint_from_spfh(np.array([temp_c]), np.array([spfh]))[0])
+                rh = rh_from_t_td(np.array([temp_c]), np.array([dew_c]))[0]
+            else:
+                dew_c = np.nan
+                rh = np.nan
+
+            u = float(u10.values)
+            v = float(v10.values)
+            wind_ms = float(np.hypot(u, v))
+            wind_mph = wind_ms * 2.23694
+
+            # APCP is typically accumulated; keep raw for now and convert later
+            qpf_mm = float(apcp.values)
+            qpf_in_raw = qpf_mm / 25.4
+
+            records.append(
+                {
+                    "valid_time": pd.to_datetime(valid_time),
+                    "f_hour": fh,
+                    "temp_c": temp_c,
+                    "temp_f": c_to_f(np.array([temp_c]))[0],
+                    "tdew_c": dew_c,
+                    "rh_percent": rh,
+                    "qpf_in_raw": qpf_in_raw,
+                    "wind10m_ms": wind_ms,
+                    "wind10m_mph": wind_mph,
+                }
+            )
+
+        df = pd.DataFrame.from_records(records).sort_values("valid_time").reset_index(drop=True)
+
+        df["qpf_in"] = df["qpf_in_raw"].diff().clip(lower=0.0)
+        df.loc[df["qpf_in"].isna(), "qpf_in"] = df.loc[df["qpf_in"].isna(), "qpf_in_raw"]
+
+        precip_type = classify_precip_type(df["temp_c"].values, df["qpf_in"].values)
+        df["precip_type"] = precip_type
+
+        snowfall, snow_acc = compute_snowfall_and_compaction(df["qpf_in"].values, df["temp_c"].values, precip_type)
+        df["snowfall_in"] = snowfall
+        df["snow_acc_in"] = snow_acc
+
+        df["apparent_temp_f"] = apparent_temperature_f(df["temp_f"].values, df["wind10m_mph"].values, df["rh_percent"].fillna(0).values)
+
+        return df
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+
+def plot_meteogram(model_dfs: dict[str, pd.DataFrame], location_label: str, run_label: str, out_path: Path) -> None:
+    if not model_dfs:
+        raise ValueError("No model data provided for plotting.")
+
+    # For now we only plot the first model provided
+    model_name, df = next(iter(model_dfs.items()))
     times = df["valid_time"]
 
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, figsize=(12, 8), sharex=True,
-        gridspec_kw={"height_ratios": [2, 1.5, 2]}
-    )
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True, constrained_layout=True)
 
-    # Panel 1: Accumulated snow
-    ax1.step(times, df["snow_acc_in"], where="mid", linewidth=2)
-    ax1.set_ylabel("Snow Depth (in)")
+    # Panel 1: Temperature and apparent temperature
+    ax1 = axes[0]
+    ax1.plot(times, df["temp_f"], label="2 m Temp (°F)", color="tab:red")
+    ax1.plot(times, df["apparent_temp_f"], label="Apparent Temp (°F)", linestyle="--", color="tab:orange")
+    ax1.axhline(32.0, color="k", linestyle=":", linewidth=1)
+    ax1.set_ylabel("Temperature (°F)")
     ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper left")
 
-    # Panel 2: QPF per period
-    ax2.bar(times, df["qpf_in"], width=0.15, align="center")
+    # Panel 2: QPF and precip type markers
+    ax2 = axes[1]
+    ax2.bar(times, df["qpf_in"], width=0.02, align="center", color="tab:blue", alpha=0.6, label="QPF (in)")
+    ptype_y = np.full_like(df["qpf_in"].values, 0.05)
+    colors = {"snow": "blue", "mix": "purple", "rain": "green", "none": "gray"}
+    markers = {"snow": "*", "mix": "s", "rain": "o", "none": "x"}
+    for ptype in np.unique(df["precip_type"]):
+        mask = df["precip_type"] == ptype
+        ax2.scatter(times[mask], ptype_y[mask], color=colors.get(ptype, "gray"), marker=markers.get(ptype, "o"), label=f"{ptype.title()} type")
     ax2.set_ylabel("QPF (in / period)")
     ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper left")
 
-    # Panel 3: Temperature
-    ax3.plot(times, df["temp_f"], marker="o")
-    ax3.axhline(32.0, color="k", linestyle="--", linewidth=1, alpha=0.6)
-    ax3.set_ylabel("2 m Temp (°F)")
+    # Panel 3: Snowfall and accumulation
+    ax3 = axes[2]
+    ax3.bar(times, df["snowfall_in"], width=0.02, align="center", color="tab:cyan", alpha=0.7, label="Snowfall (in)")
+    ax3.plot(times, df["snow_acc_in"], color="tab:blue", label="Snow Depth (in)")
+    ax3.set_ylabel("Snowfall / Snow Depth (in)")
     ax3.grid(True, alpha=0.3)
+    ax3.legend(loc="upper left")
+
+    # Panel 4: Wind
+    ax4 = axes[3]
+    ax4.plot(times, df["wind10m_mph"], color="tab:green", label="10 m Wind (mph)")
+    ax4.fill_between(times, 25, df["wind10m_mph"], where=df["wind10m_mph"] >= 25, color="orange", alpha=0.2, step="mid")
+    ax4.set_ylabel("Wind (mph)")
+    ax4.grid(True, alpha=0.3)
+    ax4.legend(loc="upper left")
 
     fig.autofmt_xdate()
+    fig.suptitle(f"{model_name} Meteogram – {location_label} – {run_label}", fontsize=14)
 
-    fig.suptitle(f"GFS 0.25° Meteogram – KCLE {title_suffix}", fontsize=14)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-
     print(f"[plot] Saved meteogram to {out_path}")
 
 
-# ------------------------------
+# ---------------------------------------------------------------------------
 # CLI
-# ------------------------------
+# ---------------------------------------------------------------------------
+
+
+def parse_hours_range(hours_arg: str) -> list[int]:
+    """Parse hours string like "0-120" or "0-72:6" into a list of ints."""
+
+    if ":" in hours_arg:
+        range_part, step_part = hours_arg.split(":", 1)
+        step = int(step_part)
+    else:
+        range_part = hours_arg
+        step = 3
+
+    start_str, end_str = range_part.split("-", 1)
+    start = int(start_str)
+    end = int(end_str)
+    return list(range(start, end + 1, step))
+
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Phase 1: GFS-only meteogram for KCLE."
-    )
-    parser.add_argument(
-        "--date",
-        help="Run date in YYYYMMDD (UTC). Default: today (UTC, adjusted if needed).",
-    )
-    parser.add_argument(
-        "--cycle",
-        type=int,
-        choices=[0, 6, 12, 18],
-        help="GFS cycle hour (0/6/12/18 UTC). Default: most recent.",
-    )
-    parser.add_argument(
-        "--fhour-start",
-        type=int,
-        default=0,
-        help="First forecast hour (default 0).",
-    )
-    parser.add_argument(
-        "--fhour-end",
-        type=int,
-        default=72,
-        help="Last forecast hour inclusive (default 72).",
-    )
-    parser.add_argument(
-        "--fhour-step",
-        type=int,
-        default=6,
-        help="Forecast hour step (default 6).",
-    )
-    parser.add_argument(
-        "--outdir",
-        default="gfs_meteogram_output",
-        help="Directory to store GRIB files and plot.",
-    )
+    parser = argparse.ArgumentParser(description="GFS meteogram for a point location")
+    parser.add_argument("--date", help="Run date in YYYYMMDD (UTC). Default: today (UTC, adjusted if needed).")
+    parser.add_argument("--cycle", type=int, choices=[0, 6, 12, 18], help="GFS cycle hour (0/6/12/18 UTC). Default: most recent.")
+    parser.add_argument("--hours", default="0-72:3", help="Forecast hours range, e.g., 0-120 or 0-72:6")
+    parser.add_argument("--lat", type=float, default=DEFAULT_LAT, help="Latitude for point forecast")
+    parser.add_argument("--lon", type=float, default=DEFAULT_LON, help="Longitude for point forecast")
+    parser.add_argument("--location-label", default="KCLE", help="Label for plots/output")
+    parser.add_argument("--outdir", default="gfs_meteogram_output", help="Directory to store GRIB files and plot")
+    parser.add_argument("--no-cache", action="store_true", help="Force re-download of GRIB files")
+    parser.add_argument("--write-csv", action="store_true", help="Write the derived dataframe to CSV alongside the plot")
 
     args = parser.parse_args()
-
     now_utc = dt.datetime.utcnow()
 
     if args.date:
@@ -345,23 +463,26 @@ def main():
     if args.cycle is not None:
         cycle = args.cycle
     else:
-        # pick most recent cycle, with simple “previous day if after midnight” tweak
         cycle = choose_default_cycle(now_utc)
         if now_utc.hour < cycle:
             run_date = run_date - dt.timedelta(days=1)
 
-    hours = list(range(args.fhour_start, args.fhour_end + 1, args.fhour_step))
+    hours = parse_hours_range(args.hours)
 
-    outdir = Path(args.outdir)
-    work_dir = outdir / f"gfs_{run_date.strftime('%Y%m%d')}_t{cycle:02d}z"
-    plot_path = work_dir / "kcle_gfs_meteogram.png"
+    work_dir = Path(args.outdir) / f"gfs_{run_date.strftime('%Y%m%d')}_t{cycle:02d}z"
+    plot_path = work_dir / f"meteogram_{args.location_label}_{run_date.strftime('%Y%m%d')}_t{cycle:02d}z.png"
 
-    print(f"Run date: {run_date}  cycle: {cycle:02d}Z  hours: {hours}")
-    print(f"Working dir: {work_dir}")
+    forecast = GFSPointForecast(run_date, cycle, args.lat, args.lon, hours, work_dir)
+    forecast.fetch(no_cache=args.no_cache)
+    df = forecast.to_dataframe()
 
-    df = build_timeseries(run_date, cycle, hours, work_dir)
-    title_suffix = f"{run_date.strftime('%Y-%m-%d')} {cycle:02d}Z"
-    plot_meteogram(df, title_suffix, plot_path)
+    run_label = f"{run_date.strftime('%Y-%m-%d')} {cycle:02d}Z"
+    plot_meteogram({forecast.model_name: df}, args.location_label, run_label, plot_path)
+
+    if args.write_csv:
+        csv_path = plot_path.with_suffix(".csv")
+        df.to_csv(csv_path, index=False)
+        print(f"[csv] Saved DataFrame to {csv_path}")
 
 
 if __name__ == "__main__":
