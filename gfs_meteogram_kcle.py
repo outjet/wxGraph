@@ -274,6 +274,7 @@ class GFSPointForecast(PointModelForecast):
 
     def to_dataframe(self) -> pd.DataFrame:
         records = []
+        missing_apcp = False
 
         for fh in self.fhours:
             path = self.work_dir / f"gfs.t{self.cycle:02d}z.f{fh:03d}.grib2"
@@ -291,7 +292,7 @@ class GFSPointForecast(PointModelForecast):
 
             # --- Temperature: surface first, fall back to 2 m if needed ---
             try:
-                t = select_var(pt_sfc, ["TMP_surface"])
+                t = select_var(pt_sfc, ["TMP_surface", "t"])
                 temp_k = float(t.values)
             except KeyError:
                 # fallback: 2 m above ground
@@ -329,15 +330,19 @@ class GFSPointForecast(PointModelForecast):
 
             # --- Wind gusts (if present) ---
             try:
-                gust = float(select_var(pt_sfc, ["GUST_surface", "GUST"]).values)
+                gust = float(select_var(pt_sfc, ["GUST_surface", "GUST", "gust"]).values)
                 gust_mph = gust * 2.23694
             except KeyError:
                 gust_mph = np.nan
 
             # --- Precipitation: accumulated APCP at surface ---
-            apcp = select_var(pt_sfc, ["APCP_surface", "apcp", "tp"])
-            qpf_mm = float(apcp.values)
-            qpf_in_raw = qpf_mm / 25.4
+            try:
+                apcp = select_var(pt_sfc, ["APCP_surface", "apcp", "tp"])
+                qpf_mm = float(apcp.values)
+                qpf_in_raw = qpf_mm / 25.4
+            except KeyError:
+                missing_apcp = True
+                qpf_in_raw = 0.0
 
             # --- Mean Sea Level Pressure (if present) ---
             try:
@@ -398,6 +403,12 @@ class GFSPointForecast(PointModelForecast):
             df["wind10m_mph"].values,
             df["rh_percent"].fillna(0).values,
         )
+
+        if missing_apcp:
+            print(
+                "[warn] Precipitation accumulation field missing; "
+                "treating QPF as 0 for this run"
+            )
 
         return df
 
