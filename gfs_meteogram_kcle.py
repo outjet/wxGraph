@@ -229,12 +229,89 @@ def compute_snowfall_and_compaction(qpf_in: np.ndarray, temp_c: np.ndarray, prec
         else:
             depth *= 0.985  # light settling below freezing
 
+
+def dewpoint_from_spfh(temp_c: np.ndarray, spfh: np.ndarray, pressure_hpa: float = 1013.0) -> np.ndarray:
+    """Approximate dewpoint (°C) from specific humidity (kg/kg) and pressure."""
+
+    epsilon = 0.622
+    w = spfh / (1.0 - spfh)  # mixing ratio
+    e = pressure_hpa * w / (w + epsilon)  # vapor pressure in hPa
+    ln_ratio = np.log(e / 6.112)
+    td_c = (243.5 * ln_ratio) / (17.67 - ln_ratio)
+    return td_c
+
+
+def apparent_temperature_f(temp_f: np.ndarray, wind_mph: np.ndarray, rh_percent: np.ndarray) -> np.ndarray:
+    """
+    Combine wind chill and heat index into a single "feels like" temperature.
+    - When temp <= 50°F and wind >= 3 mph → Wind Chill
+    - When temp >= 80°F → Heat Index
+    - Otherwise → temp itself
+    """
+
+    temp_f = np.asarray(temp_f)
+    wind_mph = np.asarray(wind_mph)
+    rh_percent = np.asarray(rh_percent)
+
+    # Wind chill
+    wind_chill = 35.74 + 0.6215 * temp_f - 35.75 * np.power(wind_mph, 0.16) + 0.4275 * temp_f * np.power(wind_mph, 0.16)
+    wind_chill_mask = (temp_f <= 50.0) & (wind_mph >= 3.0)
+
+    # Heat index (Rothfusz)
+    hi = (
+        -42.379
+        + 2.04901523 * temp_f
+        + 10.14333127 * rh_percent
+        - 0.22475541 * temp_f * rh_percent
+        - 6.83783e-3 * temp_f**2
+        - 5.481717e-2 * rh_percent**2
+        + 1.22874e-3 * temp_f**2 * rh_percent
+        + 8.5282e-4 * temp_f * rh_percent**2
+        - 1.99e-6 * temp_f**2 * rh_percent**2
+    )
+    heat_index_mask = temp_f >= 80.0
+
+    feels_like = temp_f.copy()
+    feels_like = np.where(wind_chill_mask, wind_chill, feels_like)
+    feels_like = np.where(heat_index_mask, hi, feels_like)
+    return feels_like
+
+
+def compute_snowfall_and_compaction(qpf_in: np.ndarray, temp_c: np.ndarray, precip_type: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute snowfall per period and compacted accumulation.
+    - Only create snow where precip_type is snow or mix.
+    - Snow ratio scales with temperature.
+    - Simple temperature-dependent compaction.
+    """
+
+    snowfall = np.zeros_like(qpf_in)
+    snow_acc = np.zeros_like(qpf_in)
+    depth = 0.0
+
+    for i, (qpf, t, ptype) in enumerate(zip(qpf_in, temp_c, precip_type)):
+        if ptype in {"snow", "mix"} and qpf > 0:
+            if ptype == "mix":
+                ratio = 5.0
+            elif t <= -5.0:
+                ratio = 15.0
+            elif t <= 0.0:
+                ratio = 12.0
+            else:
+                ratio = 10.0
+            snowfall[i] = qpf * ratio
+        else:
+            snowfall[i] = 0.0
+
+        if t > 0.0:
+            depth *= 0.95  # melt/settle faster above freezing
+        else:
+            depth *= 0.985  # light settling below freezing
+
         depth += snowfall[i]
         snow_acc[i] = depth
 
     return snowfall, snow_acc
-
-
 def classify_precip_type(temp_c: np.ndarray, qpf_in: np.ndarray) -> np.ndarray:
     precip = []
     for t, q in zip(temp_c, qpf_in):
@@ -412,9 +489,144 @@ def plot_meteogram(model_dfs: dict[str, pd.DataFrame], location_label: str, run_
     if not model_dfs:
         raise ValueError("No model data provided for plotting.")
 
+def classify_precip_type(temp_c: np.ndarray, qpf_in: np.ndarray) -> np.ndarray:
+    precip = []
+    for t, q in zip(temp_c, qpf_in):
+        if q == 0:
+            precip.append("none")
+        elif t <= 0.5:
+            precip.append("snow")
+        elif t <= 2.0:
+            precip.append("mix")
+        else:
+            precip.append("rain")
+    return np.array(precip, dtype=object)
+
+
+# ---------------------------------------------------------------------------
+# GFS implementation
+# ---------------------------------------------------------------------------
+
+
+class GFSPointForecast(PointModelForecast):
+    def __init__(self, run_date: dt.date, cycle: int, lat: float, lon: float, fhours: list[int], work_dir: Path):
+        self.run_date = run_date
+        self.cycle = cycle
+        self.lat = lat
+        self.lon = lon
+        self.fhours = fhours
+        self.work_dir = work_dir
+
+    @property
+    def model_name(self) -> str:  # pragma: no cover - trivial
+        return "GFS"
+
+    def fetch(self, *, no_cache: bool = False) -> None:
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        for fh in self.fhours:
+            url = build_gfs_url(self.run_date, self.cycle, fh)
+            out_path = self.work_dir / f"gfs.t{self.cycle:02d}z.f{fh:03d}.grib2"
+            download_grib(url, out_path, no_cache=no_cache)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        records = []
+        for fh in self.fhours:
+            path = self.work_dir / f"gfs.t{self.cycle:02d}z.f{fh:03d}.grib2"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing GRIB file: {path}. Run fetch() first.")
+
+            ds = open_gfs_dataset(path)
+            lat_name, lon_name = get_coord_names(ds)
+            pt = ds.sel({lat_name: self.lat, lon_name: self.lon}, method="nearest")
+            ds_pt = pt.to_dataset()
+
+            t2m = select_var(ds_pt, ["t2m", "2t", "TMP_2maboveground"])
+            d2m = ds_pt.data_vars.get("d2m", None)
+            if d2m is None:
+                try:
+                    d2m = select_var(ds_pt, ["DPT_2maboveground", "dpt"])
+                except KeyError:
+                    d2m = None
+            spfh2m = ds_pt.data_vars.get("SPFH_2maboveground", None)
+            u10 = select_var(ds_pt, ["u10", "UGRD_10maboveground"])
+            v10 = select_var(ds_pt, ["v10", "VGRD_10maboveground"])
+            apcp = select_var(ds_pt, ["tp", "prate", "apcp", "APCP_surface"])
+
+            time = pt["time"]
+            if "step" in pt.coords:
+                valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(pt["step"].values)).item()
+            else:
+                valid_time = (pd.to_datetime(time.values) + pd.to_timedelta(fh, "h")).to_pydatetime()
+
+            temp_k = float(t2m.values)
+            temp_c = temp_k - 273.15
+
+            if d2m is not None:
+                dew_k = float(d2m.values)
+                dew_c = dew_k - 273.15
+                rh = rh_from_t_td(np.array([temp_c]), np.array([dew_c]))[0]
+            elif spfh2m is not None:
+                spfh = float(spfh2m.values)
+                dew_c = float(dewpoint_from_spfh(np.array([temp_c]), np.array([spfh]))[0])
+                rh = rh_from_t_td(np.array([temp_c]), np.array([dew_c]))[0]
+            else:
+                dew_c = np.nan
+                rh = np.nan
+
+            u = float(u10.values)
+            v = float(v10.values)
+            wind_ms = float(np.hypot(u, v))
+            wind_mph = wind_ms * 2.23694
+
+            # APCP is typically accumulated; keep raw for now and convert later
+            qpf_mm = float(apcp.values)
+            qpf_in_raw = qpf_mm / 25.4
+
+            records.append(
+                {
+                    "valid_time": pd.to_datetime(valid_time),
+                    "f_hour": fh,
+                    "temp_c": temp_c,
+                    "temp_f": c_to_f(np.array([temp_c]))[0],
+                    "tdew_c": dew_c,
+                    "rh_percent": rh,
+                    "qpf_in_raw": qpf_in_raw,
+                    "wind10m_ms": wind_ms,
+                    "wind10m_mph": wind_mph,
+                }
+            )
+
+        df = pd.DataFrame.from_records(records).sort_values("valid_time").reset_index(drop=True)
+
+        df["qpf_in"] = df["qpf_in_raw"].diff().clip(lower=0.0)
+        df.loc[df["qpf_in"].isna(), "qpf_in"] = df.loc[df["qpf_in"].isna(), "qpf_in_raw"]
+
+        precip_type = classify_precip_type(df["temp_c"].values, df["qpf_in"].values)
+        df["precip_type"] = precip_type
+
+        snowfall, snow_acc = compute_snowfall_and_compaction(df["qpf_in"].values, df["temp_c"].values, precip_type)
+        df["snowfall_in"] = snowfall
+        df["snow_acc_in"] = snow_acc
+
+        df["apparent_temp_f"] = apparent_temperature_f(df["temp_f"].values, df["wind10m_mph"].values, df["rh_percent"].fillna(0).values)
+
+        return df
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+
+def plot_meteogram(model_dfs: dict[str, pd.DataFrame], location_label: str, run_label: str, out_path: Path) -> None:
+    if not model_dfs:
+        raise ValueError("No model data provided for plotting.")
+
     # For now we only plot the first model provided
     model_name, df = next(iter(model_dfs.items()))
     times = df["valid_time"]
+
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True, constrained_layout=True)
 
     has_mslp = "mslp_hpa" in df.columns and df["mslp_hpa"].notna().any()
     n_panels = 5 if has_mslp else 4
@@ -450,6 +662,18 @@ def plot_meteogram(model_dfs: dict[str, pd.DataFrame], location_label: str, run_
     ax3.set_ylabel("Snowfall / Snow Depth (in)")
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc="upper left")
+
+    # Panel 4: Wind
+    ax4 = axes[3]
+    ax4.plot(times, df["wind10m_mph"], color="tab:green", label="10 m Wind (mph)")
+    ax4.fill_between(times, 25, df["wind10m_mph"], where=df["wind10m_mph"] >= 25, color="orange", alpha=0.2, step="mid")
+    ax4.set_ylabel("Wind (mph)")
+    ax4.grid(True, alpha=0.3)
+    ax4.legend(loc="upper left")
+
+    fig.autofmt_xdate()
+    fig.suptitle(f"{model_name} Meteogram – {location_label} – {run_label}", fontsize=14)
+
 
     # Panel 4: Wind (and gusts if available)
     ax_wind = axes[3]
