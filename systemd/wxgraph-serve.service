@@ -1,0 +1,13 @@
+[Unit]
+Description=wxGraph FastAPI server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/wxGraph
+EnvironmentFile=%h/wxGraph/.env
+ExecStart=/usr/bin/env uvicorn webapp.server:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

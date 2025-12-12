@@ -1,6 +1,36 @@
-venv/
+# Python artifacts
 __pycache__/
 *.py[cod]
-*.egg-info/
-.DS_Store
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# Output directories
+.gfs_cache/
 gfs_meteogram_output/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Environment files
+.env
+.env.*
+
+# Coverage / test
+.pytest_cache/
+.coverage*
+htmlcov/
+
+# Logs
+*.log

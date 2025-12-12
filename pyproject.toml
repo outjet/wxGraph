@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wxgraph"
+version = "0.1.0"
+description = "Multi-model meteogram generator and web viewer."
+authors = [{name = "wxGraph Maintainers"}]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cfgrib>=0.9.10",
+    "fastapi>=0.110",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "requests>=2.31",
+    "uvicorn>=0.29",
+    "xarray>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+line-length = 110
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-ra"
