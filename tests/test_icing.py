@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from wxgraph.icing import add_icing_fields
+from wxgraph.pipeline.icing import add_icing_fields
 
 
 def _build_df(freq_hours: int, temps_c: list[float], qpf_mm_accum: list[float], snow_mm_accum: list[float], rh: float = 95.0):

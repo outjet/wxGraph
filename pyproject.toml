@@ -18,6 +18,7 @@ dependencies = [
     "requests>=2.31",
     "uvicorn>=0.29",
     "xarray>=2024.1",
+    "click>=8.1",
 ]
 
 [project.optional-dependencies]
@@ -30,9 +31,9 @@ dev = [
 line-length = 110
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src"]
 addopts = "-ra"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["wxgraph"]

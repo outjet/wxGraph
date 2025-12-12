@@ -31,7 +31,7 @@ import pandas as pd
 import requests
 import xarray as xr
 
-from wxgraph.icing import add_icing_fields
+from wxgraph.pipeline.icing import add_icing_fields
 
 BASE_URL = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
 AIGFS_BASE_URLS = [
