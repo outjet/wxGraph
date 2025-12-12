@@ -63,6 +63,44 @@ python gfs_meteogram_kcle.py --lat 41.3 --lon -81.9 --models gfs,rap --hours 0-3
 4. `webapp/server.py` serves `/` (static frontend) and `/api/meteogram/latest` (latest JSON). The
    server scans `WXGRAPH_OUTPUT_DIR` for the newest JSON if multiple runs exist.
 
+## Icing / LCR Diagnostics
+The backend now computes a heuristic loss-of-control risk (LCR) index and related icing fields for
+every model/time. Calculations happen in Python (see `wxgraph/icing.py`) so the frontend simply
+remaps the JSON fields.
+
+### Fields emitted per model (examples use `GFS_` prefix)
+- `GFS_temp_c`, `GFS_temp_f`, `GFS_temp_hist6h_c`, `GFS_temp_hist6h_f`
+- `GFS_rh_pct`, `GFS_dp_c`, `GFS_dp_f`, `GFS_wb_c`, `GFS_wb_f`
+- `GFS_qpf_in_accum`, `GFS_ipf_in` (per step in inches), `GFS_ipf_in_per_hr` (per-hour normalized)
+- `GFS_snow_in_accum`, `GFS_snowsfc_in`, `GFS_snowsfc_in_per_hr`
+- `GFS_cip_inph`, `GFS_bfp_inph`, `GFS_nfp_inph`, `GFS_afp_inph` (critical/near-freezing buckets)
+  and the per-step equivalents (`*_cip_in`, etc.)
+- `GFS_lcr`, `GFS_lcron` (baseline-flag), `GFS_dt_hours`, `GFS_gust_mph`, `GFS_cloud_pct`
+
+### Units and usage
+- Accumulated precipitation/snow are inches; per-step values represent the model timestep.
+- Per-hour values (`*_in_per_hr`, `*_inph`) divide by `*_dt_hours` so they can be compared against
+  the thresholds in the original NOMADS scripts.
+- `*_dt_hours` documents the timestep so external tools can convert between per-step/per-hour.
+
+### Severity mapping (used by upcoming frontend strip)
+- `0`: None
+- `1–2`: Low
+- `3–4`: Elevated
+- `5–6`: High
+- `>=7`: Extreme
+
+### Caveats
+- We approximate dewpoint via Bolton (1980) when explicit fields are missing; wet bulb uses the
+  Stull formulation and assumes RH exists.
+- Snow accumulations use the existing `snow_acc_in` (compacted) when available, otherwise a simple
+  cumulative sum of per-step snowfall; treat units accordingly.
+- Without explicit freezing-rain categorical flags, LCR increments for freezing rain rely on the
+  supplied columns (currently none), so freezing-drizzle detection remains conservative.
+- Cloud cover defaults to 100% when the model does not provide `tcdc`.
+- LCR is intended for situational awareness only; it does not account for local treatment,
+  bridges/overpasses, or sub-grid microclimates.
+
 ## Commands & Scripts
 - `make install` – install dependencies in editable mode.
 - `make fetch` – run the generator with merged CSV/JSON outputs.
@@ -111,4 +149,3 @@ A Dockerfile isn’t provided yet, but the README’s “Deployment options” s
 - Licensed under MIT (see `LICENSE`).
 - Contributions welcome! File issues/PRs with clear steps to reproduce and ensure `make lint test` is
   clean.
-

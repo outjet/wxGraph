@@ -31,6 +31,8 @@ import pandas as pd
 import requests
 import xarray as xr
 
+from wxgraph.icing import add_icing_fields
+
 BASE_URL = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
 AIGFS_BASE_URLS = [
     "https://nomads.ncep.noaa.gov/pub/data/nccf/com/aigfs/v1.0",
@@ -896,16 +898,28 @@ MERGED_FIELDS = [
     "snowfall_in",
     "snow_acc_in",
     "wind10m_mph",
-    "wetbulb_f",
-    "cip_in",
-    "bfp_in",
-    "nfp_in",
-    "afp_in",
-    "road_icing_risk",
-    "road_icing_reason",
-    "freeze_fog_flag",
-    "freezing_precip_flag",
-    "temp_hist_6h_f",
+    "temp_hist6h_c",
+    "temp_hist6h_f",
+    "rh_pct",
+    "dp_c",
+    "dp_f",
+    "wb_c",
+    "wb_f",
+    "qpf_in_accum",
+    "ipf_in",
+    "ipf_in_per_hr",
+    "snow_in_accum",
+    "snowsfc_in",
+    "snowsfc_in_per_hr",
+    "cip_inph",
+    "bfp_inph",
+    "nfp_inph",
+    "afp_inph",
+    "lcr",
+    "lcron",
+    "gust_mph",
+    "cloud_pct",
+    "dt_hours",
 ]
 
 
@@ -916,12 +930,27 @@ def build_merged_wide_dataframe(
 
     merged_df: pd.DataFrame | None = None
     for name, df in model_dfs.items():
-        available_fields = [field for field in fields if field in df.columns]
+        col_prefix = name.upper().replace("-", "_").replace(" ", "_")
+        available_fields = []
+        for field in fields:
+            if field in df.columns or f"{col_prefix}_{field}" in df.columns:
+                available_fields.append(field)
         if not available_fields:
             continue
-        col_prefix = name.upper().replace("-", "_").replace(" ", "_")
-        rename_map = {field: f"{col_prefix}_{field}" for field in available_fields}
-        subset = df[["valid_time", *available_fields]].rename(columns=rename_map)
+        rename_map: dict[str, str] = {}
+        subset_cols = ["valid_time"]
+        for field in available_fields:
+            source_col = field
+            pref_col = f"{col_prefix}_{field}"
+            if field not in df.columns and pref_col in df.columns:
+                source_col = pref_col
+            if source_col not in df.columns:
+                continue
+            subset_cols.append(source_col)
+            rename_map[source_col] = pref_col
+        if len(subset_cols) == 1:
+            continue
+        subset = df[subset_cols].rename(columns=rename_map)
         if merged_df is None:
             merged_df = subset
         else:
@@ -1372,12 +1401,14 @@ def add_road_icing_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def log_road_icing_summary(model_name: str, df: pd.DataFrame) -> None:
+def log_lcr_summary(model_name: str, df: pd.DataFrame) -> None:
     """Emit a concise summary of the icing risk timeline for sanity checks."""
 
-    if "road_icing_risk" not in df.columns:
+    col_prefix = model_name.upper().replace("-", "_").replace(" ", "_")
+    col = f"{col_prefix}_lcr"
+    if col not in df.columns:
         return
-    risk = df["road_icing_risk"]
+    risk = df[col]
     valid_time = df["valid_time"]
     high_count = int((risk >= 4).sum())
     risk_mask = risk >= 1
@@ -1385,7 +1416,7 @@ def log_road_icing_summary(model_name: str, df: pd.DataFrame) -> None:
         first_time = valid_time[risk_mask].iloc[0]
         last_time = valid_time[risk_mask].iloc[-1]
         logger.info(
-            "[icing] %s – %d periods with risk>=4, risk>=1 from %s to %s",
+            "[icing] %s – %d periods with LCR>=4, LCR>=1 from %s to %s",
             model_name,
             high_count,
             first_time,
@@ -2137,8 +2168,57 @@ def main():
                 df_raw = forecast.to_dataframe(include_raw_snow_vars=True)
                 df = validate_df(df_raw, name)
                 df = df.drop(columns=["snowfall_native_in_raw", "snow_depth_native_in"], errors="ignore")
-                df = add_road_icing_diagnostics(df)
-                log_road_icing_summary(name, df)
+                helper_cols: list[str] = []
+                temp_k_col = None
+                if "temp_c" in df.columns:
+                    temp_k_col = "_icing_temp_k"
+                    df[temp_k_col] = df["temp_c"] + 273.15
+                    helper_cols.append(temp_k_col)
+                dp_k_col = None
+                if "tdew_c" in df.columns:
+                    dp_k_col = "_icing_dp_k"
+                    df[dp_k_col] = df["tdew_c"] + 273.15
+                    helper_cols.append(dp_k_col)
+                qpf_accum_mm_col = None
+                if "qpf_in_raw" in df.columns:
+                    qpf_accum_mm_col = "_icing_qpf_mm"
+                    df[qpf_accum_mm_col] = df["qpf_in_raw"].fillna(0) * 25.4
+                    helper_cols.append(qpf_accum_mm_col)
+                elif "qpf_in" in df.columns:
+                    qpf_accum_mm_col = "_icing_qpf_mm"
+                    df[qpf_accum_mm_col] = df["qpf_in"].fillna(0).cumsum() * 25.4
+                    helper_cols.append(qpf_accum_mm_col)
+                snow_accum_mm_col = None
+                if "snow_acc_in" in df.columns:
+                    snow_accum_mm_col = "_icing_snow_mm"
+                    df[snow_accum_mm_col] = df["snow_acc_in"].fillna(0) * 25.4
+                    helper_cols.append(snow_accum_mm_col)
+                elif "snowfall_in" in df.columns:
+                    snow_accum_mm_col = "_icing_snow_mm"
+                    df[snow_accum_mm_col] = df["snowfall_in"].fillna(0).cumsum() * 25.4
+                    helper_cols.append(snow_accum_mm_col)
+                snow_flag_col = None
+                if "precip_type" in df.columns:
+                    snow_flag_col = "_icing_snptype"
+                    df[snow_flag_col] = df["precip_type"].fillna("").str.lower().eq("snow").astype(float)
+                    helper_cols.append(snow_flag_col)
+
+                df = add_icing_fields(
+                    df,
+                    prefix=name,
+                    time_col="valid_time",
+                    temp_k_col=temp_k_col,
+                    rh_pct_col="rh_percent" if "rh_percent" in df.columns else None,
+                    dp_k_col=dp_k_col,
+                    qpf_accum_mm_col=qpf_accum_mm_col,
+                    snow_accum_mm_col=snow_accum_mm_col,
+                    snow_flag_col=snow_flag_col,
+                    gust_ms_col="wind10m_ms" if "wind10m_ms" in df.columns else None,
+                    cloud_pct_col=None,
+                    latitude=args.lat,
+                )
+                df = df.drop(columns=helper_cols, errors="ignore")
+                log_lcr_summary(name, df)
                 log_valid_time_summary(name, run_date, cycle, df)
             except requests.HTTPError as exc:
                 errors[name] = exc
