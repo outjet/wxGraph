@@ -1,0 +1,12 @@
+[Unit]
+Description=wxGraph data fetch
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/wxGraph
+EnvironmentFile=%h/wxGraph/.env
+ExecStart=%h/wxGraph/scripts/fetch.sh
+
+[Install]
+WantedBy=multi-user.target

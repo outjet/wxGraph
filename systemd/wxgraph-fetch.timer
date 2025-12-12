@@ -1,0 +1,11 @@
+[Unit]
+Description=Run wxGraph fetch every hour
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=wxgraph-fetch.service
+
+[Install]
+WantedBy=timers.target
