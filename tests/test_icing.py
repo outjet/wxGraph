@@ -5,7 +5,7 @@ from wxgraph.pipeline.icing import add_icing_fields
 
 
 def _build_df(freq_hours: int, temps_c: list[float], qpf_mm_accum: list[float], snow_mm_accum: list[float], rh: float = 95.0):
-    times = pd.date_range("2024-01-01", periods=len(temps_c), freq=f"{freq_hours}H")
+    times = pd.date_range("2024-01-01", periods=len(temps_c), freq=f"{freq_hours}h")
     qpf_acc = np.array(qpf_mm_accum)
     snow_acc = np.array(snow_mm_accum)
     return pd.DataFrame(

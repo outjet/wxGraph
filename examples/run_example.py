@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from wxgraph.backends.nomads_backend import NomadsBackend
@@ -17,7 +18,7 @@ def run_example() -> None:
     work_dir = Path("data/gfs_example")
     backend = NomadsBackend()
     model = GFS(
-        run_date="20240101",
+        run_date=date(2024, 1, 1),
         cycle=0,
         lat=41.48,
         lon=-81.81,

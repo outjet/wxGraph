@@ -23,9 +23,16 @@ class FetchBackend(ABC):
         outdir: Path,
         *,
         no_cache: bool,
+        metadata: Mapping[str, object] | None = None,
     ) -> None:
         """Ensure the raw data files exist for the requested forecast hours."""
 
     @abstractmethod
-    def extract_point(self, path: Path, lat: float, lon: float) -> dict[str, object]:
+    def extract_point(
+        self,
+        path: Path,
+        lat: float,
+        lon: float,
+        fh: int | None = None,
+    ) -> dict[str, object]:
         """Extract a normalized point record from a raw dataset."""
