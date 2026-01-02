@@ -49,6 +49,14 @@ wxGraph reads defaults from CLI flags _or_ environment variables defined in `.en
 | `WXGRAPH_REFRESH_MINUTES` | Hint for external schedulers |
 | `WXGRAPH_GCS_BUCKET` | Optional GCS bucket for persisting latest JSON/PNG |
 | `WXGRAPH_GCS_PREFIX` | Optional prefix for GCS objects (default: `latest`) |
+| `WXGRAPH_LCR_ALERT_ENABLED` | Set `1` to enable LCR Pushover alerts |
+| `WXGRAPH_LCR_ALERT_MODEL` | Model to scan for LCR alerts (default: `HRRR`) |
+| `WXGRAPH_LCR_ALERT_HOURS_AHEAD` | Hours of forecast to scan (default: `12`) |
+| `WXGRAPH_LCR_ALERT_THRESHOLD` | Minimum LCR score to alert (default: `5`) |
+| `WXGRAPH_LCR_ALERT_COOLDOWN_HOURS` | Cooldown window between alerts (default: `4`) |
+| `WXGRAPH_LCR_ALERT_STATE_NAME` | GCS object name for alert state (default: `lcr_alert_state.json`) |
+| `WXGRAPH_PUSHOVER_APP_TOKEN` | Pushover application token |
+| `WXGRAPH_PUSHOVER_USER_KEY` | Pushover user key |
 | `WXGRAPH_RUN_TOKEN` | Optional token required for `POST /api/meteogram/run` |
 | `WXGRAPH_SNOW_RATIO` | Snow ratio method (`10to1` or `baxter`) |
 | `WXGRAPH_BLEND_PERIODS` | Forecast steps to blend when stitching runs |

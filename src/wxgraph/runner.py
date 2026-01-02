@@ -25,6 +25,7 @@ from wxgraph.config import (
     get_work_dir,
 )
 from wxgraph.models import AIGFS, GEFS, GFS, HGEFS, HRRR, NAM, RAP
+from wxgraph.alerts import maybe_send_lcr_alert
 from wxgraph.pipeline import add_dewpoint, add_precip_periods, add_wetbulb, merge_models, normalize
 from wxgraph.pipeline.icing import add_icing_fields
 
@@ -167,6 +168,10 @@ class MeteogramRunner:
         png_path = self.output_dir / "meteogram_latest.png"
         self.plotter(model_dfs, self.location_label, self.run_label, png_path)
         self._write_status(status, success=True, detail=None)
+        try:
+            maybe_send_lcr_alert(merged)
+        except Exception as exc:
+            LOGGER.warning("LCR alerting skipped: %s", exc)
         return {"json": json_path, "png": png_path, "merged": merged}
 
     def _prepare_model_dataframe(self, df: pd.DataFrame, prefix: str) -> pd.DataFrame:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -132,3 +133,47 @@ def get_latest_gcs_metadata() -> dict[str, dict[str, str]]:
             "updated": updated,
         }
     return metadata
+
+
+def read_gcs_json(name: str) -> dict | None:
+    settings = _gcs_settings()
+    if not settings:
+        return None
+    bucket_name, prefix = settings
+    try:
+        from google.cloud import storage
+    except Exception as exc:
+        LOGGER.warning("GCS JSON read skipped: %s", exc)
+        return None
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(_blob_name(prefix, name))
+    if not blob.exists():
+        return None
+    raw = blob.download_as_bytes()
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        LOGGER.warning("GCS JSON read failed for %s: %s", name, exc)
+        return None
+
+
+def write_gcs_json(name: str, payload: dict) -> None:
+    settings = _gcs_settings()
+    if not settings:
+        return
+    bucket_name, prefix = settings
+    try:
+        from google.cloud import storage
+    except Exception as exc:
+        LOGGER.warning("GCS JSON write skipped: %s", exc)
+        return
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(_blob_name(prefix, name))
+    blob.upload_from_string(
+        json.dumps(payload, indent=2, sort_keys=True),
+        content_type="application/json",
+    )

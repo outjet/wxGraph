@@ -12,6 +12,7 @@ venv/
 # Output directories
 .gfs_cache/
 gfs_meteogram_output/
+.gcp_sources/
 
 # OS / editor noise
 .DS_Store
