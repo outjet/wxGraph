@@ -16,6 +16,7 @@ forecast sources can be plugged in later.
 
 import argparse
 import datetime as dt
+import email.utils
 import logging
 import os
 from pathlib import Path
@@ -127,6 +128,24 @@ def step_back_cycle(run_date: dt.date, cycle: int) -> tuple[dt.date, int]:
     if cycle == 0:
         return run_date - dt.timedelta(days=1), 18
     return run_date, cycle - 6
+
+
+def get_nomads_utc_now() -> dt.datetime | None:
+    """Return UTC time from NOMADS headers when available."""
+
+    try:
+        response = requests.head("https://nomads.ncep.noaa.gov/", timeout=10)
+        date_header = response.headers.get("Date")
+        if not date_header:
+            return None
+        parsed = email.utils.parsedate_to_datetime(date_header)
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return None
 
 
 def build_gfs_url(run_date: dt.date, cycle: int, f_hour: int) -> str:

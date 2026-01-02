@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import date
 from pathlib import Path
 from typing import Sequence, Mapping
+import logging
 
 import pandas as pd
 
@@ -45,7 +47,7 @@ class BasePointModel(PointModel):
 
     def __init__(
         self,
-        run_date: str,
+        run_date: date,
         cycle: int,
         lat: float,
         lon: float,
@@ -77,7 +79,15 @@ class BasePointModel(PointModel):
         Delegate download operations to the backend.
         """
 
-        backend.download(self.model_key, self.fhours, self.bbox, self.work_dir, no_cache=no_cache)
+        metadata = {"run_date": self.run_date, "cycle": self.cycle, "bbox": self.bbox}
+        backend.download(
+            self.model_key,
+            self.fhours,
+            self.bbox,
+            self.work_dir,
+            no_cache=no_cache,
+            metadata=metadata,
+        )
 
     def to_dataframe(self, backend: FetchBackend) -> pd.DataFrame:
         """
@@ -85,13 +95,24 @@ class BasePointModel(PointModel):
         """
 
         records: list[dict[str, object]] = []
+        missing: list[int] = []
+        logger = logging.getLogger("wxgraph.models")
         for fh in self.fhours:
             path = self._record_path(fh)
-            record = backend.extract_point(path, self.lat, self.lon)
+            try:
+                record = backend.extract_point(path, self.lat, self.lon, fh)
+            except (FileNotFoundError, EOFError, OSError, ValueError) as exc:
+                missing.append(fh)
+                if path.exists():
+                    path.unlink(missing_ok=True)
+                logger.warning("Missing or corrupt %s fhour %s: %s", self.model_key, fh, exc)
+                continue
             record["model"] = self.model_name
             record["forecast_hour"] = fh
             records.append(record)
-        return pd.DataFrame(records)
+        df = pd.DataFrame(records)
+        df.attrs["missing_fhours"] = missing
+        return df
 
     def _record_path(self, fh: int) -> Path:
         """Build the expected GRIB2 file path for a forecast hour."""

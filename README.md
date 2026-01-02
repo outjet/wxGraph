@@ -25,9 +25,9 @@ keeps the latest JSON/PNG bundle ready for a tiny FastAPI server to serve.
    ```
 2. **Fetch the latest meteogram bundle**
    ```bash
-   make fetch
+   PYTHONPATH=src ./venv/bin/python -m wxgraph.cli --models gfs,nam,rap --run-date 20240101 --cycle 0 --fhours 0-24:3
    ```
-   This populates `gfs_meteogram_output/.../meteogram_latest.json` plus PNG/CSV artifacts.
+   The runner stores `output/meteogram_latest.json` and `output/meteogram_latest.png` ready for the web UI; `make fetch` still exists for compatibility but the CLI now drives the modular stack.
 3. **Serve the frontend/API locally**
    ```bash
    make serve
@@ -47,11 +47,24 @@ wxGraph reads defaults from CLI flags _or_ environment variables defined in `.en
 | `WXGRAPH_HOURS` | Forecast hour spec (`start-end:step`) |
 | `WXGRAPH_LOG_LEVEL` | Python log level (`INFO`, `DEBUG`, …) |
 | `WXGRAPH_REFRESH_MINUTES` | Hint for external schedulers |
+| `WXGRAPH_GCS_BUCKET` | Optional GCS bucket for persisting latest JSON/PNG |
+| `WXGRAPH_GCS_PREFIX` | Optional prefix for GCS objects (default: `latest`) |
+| `WXGRAPH_RUN_TOKEN` | Optional token required for `POST /api/meteogram/run` |
+| `WXGRAPH_SNOW_RATIO` | Snow ratio method (`10to1` or `baxter`) |
+| `WXGRAPH_BLEND_PERIODS` | Forecast steps to blend when stitching runs |
 
-You can always override defaults with CLI flags:
+You can still override parameters with CLI flags. The new runner exposes the same options:
 ```bash
-python gfs_meteogram_kcle.py --lat 41.3 --lon -81.9 --models gfs,rap --hours 0-36:3
+PYTHONPATH=src ./venv/bin/python -m wxgraph.cli --lat 41.3 --lon -81.9 --models gfs,rap --fhours 0-36:3
 ```
+
+## API-triggered runner
+POST `/api/meteogram/run` enqueues the latest cycle via FastAPI without blocking the request. It uses the same lat/lon/bbox defaults as the CLI, downloads every integrated model, runs the pipelines, and writes `meteogram_latest.{json,png}` under `WXGRAPH_OUTPUT_DIR` (defaults to `gfs_meteogram_output/`). The web UI keeps polling `/api/meteogram/latest`.
+
+## Status + caching behavior
+- `/api/meteogram/status` reports the latest local JSON timestamp and (when configured) GCS object metadata.
+- Each model caches its latest output; if a new run is partial, the system backfills missing valid times from the last complete run for that model.
+- `/api/meteogram/status` includes per-model success/missing-hour details via `meteogram_status.json`.
 
 ## Data Flow
 1. `gfs_meteogram_kcle.py` downloads GRIB files per model/hour. If a requested run is not yet on
@@ -103,7 +116,9 @@ remaps the JSON fields.
 
 ## Commands & Scripts
 - `make install` – install dependencies in editable mode.
-- `make fetch` – run the generator with merged CSV/JSON outputs.
+- `PYTHONPATH=src ./venv/bin/python -m wxgraph.cli --models gfs,nam --run-date 20240101 --cycle 0 --fhours 0-24:3` – run the modular fetch/normalize/publish workflow.
+- `make fetch` – legacy target that still exists but now wraps the same pipeline.
+- `curl -X POST http://localhost:8000/api/meteogram/run` – trigger the API-backed runner (outputs written to `WXGRAPH_OUTPUT_DIR`).
 - `make serve` – start the FastAPI server (reload disabled).
 - `make dev` – see `scripts/dev.sh` (fetch + `uvicorn --reload`).
 - `make lint` / `make lint-fix` – Ruff static analysis.
@@ -130,11 +145,12 @@ sudo systemctl enable --now wxgraph-fetch.timer wxgraph-serve.service
 Tune the timer/ExecStart to match your site’s desired cadence.
 
 ### Docker (optional)
-A Dockerfile isn’t provided yet, but the README’s “Deployment options” section explains how to wrap
-`make fetch` + `make serve` in your favorite orchestrator. (Add a PR if you prefer a baked image.)
+See `Dockerfile` for a production image that runs the FastAPI service on port 8080.
+`docs/gcp.md` walks through a Cloud Run deployment.
 
 ## Tests & CI
 - Unit tests live under `tests/`; run `pytest` locally or via `make test`.
+- Integration tests download real NOMADS subsets; set `WXGRAPH_RUN_INTEGRATION=1` to enable the `tests/test_nomads_integration.py` and `tests/test_hrrr_integration.py` suites.
 - `.github/workflows/ci.yml` executes Ruff + pytest on every push/PR.
 
 ## Troubleshooting
@@ -143,7 +159,7 @@ A Dockerfile isn’t provided yet, but the README’s “Deployment options” s
 | `404/403` for every model | Requested cycle not yet on NOMADS; the tool automatically steps back, but check log timestamps / run `--date YYYYMMDD --cycle HH` explicitly. |
 | Plotly shows only one panel | Ensure `meteogram_latest.json` exists and web server has read access. Use browser dev tools to inspect `/api/meteogram/latest`. |
 | FastAPI server returns 404 for JSON | Confirm `WXGRAPH_OUTPUT_DIR` contains `meteogram_latest.json` and the service user has permission to read it. |
-| NOMADS sporadically fails | Rerun `make fetch`; consider adding retry/backoff or caching the last good JSON (on the roadmap). |
+| NOMADS sporadically fails | Rerun `PYTHONPATH=src ./venv/bin/python -m wxgraph.cli --models gfs,nam --run-date YYYYMMDD --cycle 0` to refresh the bundle; consider adding retry/backoff or caching the last good JSON (on the roadmap). |
 
 ## License & Contributing
 - Licensed under MIT (see `LICENSE`).

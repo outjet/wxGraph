@@ -63,13 +63,44 @@ def _decumulate(accum: np.ndarray) -> np.ndarray:
     if len(accum) == 0:
         return accum
     diffs = np.diff(accum, prepend=accum[0])
-    return diffs
+    return np.maximum(diffs, 0.0)
 
 
 def _per_hour(values: np.ndarray, dt_hours: float) -> np.ndarray:
     if dt_hours <= 0:
         dt_hours = 1.0
     return values / dt_hours
+
+
+def _apparent_temp_f(temp_f: np.ndarray, wind_mph: np.ndarray, rh_pct: np.ndarray) -> np.ndarray:
+    apparent = temp_f.copy()
+    wind = np.maximum(wind_mph, 0.0)
+    rh = np.clip(rh_pct, 0.0, 100.0)
+
+    wind_chill_mask = (temp_f <= 50.0) & (wind >= 3.0)
+    if np.any(wind_chill_mask):
+        v16 = np.power(wind[wind_chill_mask], 0.16)
+        t = temp_f[wind_chill_mask]
+        apparent[wind_chill_mask] = 35.74 + 0.6215 * t - 35.75 * v16 + 0.4275 * t * v16
+
+    heat_mask = (temp_f >= 80.0) & (rh >= 40.0)
+    if np.any(heat_mask):
+        t = temp_f[heat_mask]
+        r = rh[heat_mask]
+        hi = (
+            -42.379
+            + 2.04901523 * t
+            + 10.14333127 * r
+            - 0.22475541 * t * r
+            - 0.00683783 * t * t
+            - 0.05481717 * r * r
+            + 0.00122874 * t * t * r
+            + 0.00085282 * t * r * r
+            - 0.00000199 * t * t * r * r
+        )
+        apparent[heat_mask] = hi
+
+    return apparent
 
 
 def add_icing_fields(
@@ -85,6 +116,8 @@ def add_icing_fields(
     frzr_flag_col: Optional[str] = None,
     snow_flag_col: Optional[str] = None,
     gust_ms_col: Optional[str] = None,
+    gust_mph_col: Optional[str] = None,
+    wind_mph_col: Optional[str] = None,
     cloud_pct_col: Optional[str] = None,
     latitude: Optional[float] = None,
 ) -> pd.DataFrame:
@@ -145,9 +178,13 @@ def add_icing_fields(
     if frzr_flag_col and frzr_flag_col in df:
         zrptype = df[frzr_flag_col].astype(float).to_numpy()
 
-    gust_mph = get_col(gust_ms_col) * MS_TO_MPH
+    gust_mph = get_col(gust_mph_col)
+    if np.isnan(gust_mph).all():
+        gust_mph = get_col(gust_ms_col) * MS_TO_MPH
+    wind_mph = get_col(wind_mph_col)
+    if np.isnan(wind_mph).all():
+        wind_mph = gust_mph
     cloud_pct = get_col(cloud_pct_col)
-    cloud_pct = np.where(np.isnan(cloud_pct), 100.0, cloud_pct)
 
     def set_col(name: str, values: np.ndarray):
         df[f"{prefix}_{name}"] = values
@@ -156,11 +193,15 @@ def add_icing_fields(
     set_col("temp_f", temp_f)
     set_col("temp_hist6h_c", temp_hist6h_c)
     set_col("temp_hist6h_f", temp_hist6h_f)
+    set_col("wind10m_mph", wind_mph)
     set_col("rh_pct", rh_pct)
     set_col("dp_c", dp_c)
     set_col("dp_f", _c_to_f(dp_c))
     set_col("wb_c", wb_c)
     set_col("wb_f", wb_f)
+    apparent_f = _apparent_temp_f(temp_f, wind_mph, rh_pct)
+    set_col("apparent_temp_f", apparent_f)
+    set_col("apparent_temp_c", (apparent_f - 32.0) * 5.0 / 9.0)
     set_col("qpf_in_accum", qpf_in_accum)
     set_col("ipf_in", ipf_in)
     set_col("ipf_in_per_hr", ipf_in_per_hr)

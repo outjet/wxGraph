@@ -1,7 +1,9 @@
 const PANEL_CONFIG = [
   { key: 'temp', elementId: 'temp-panel', title: 'Temperature', yTitle: '°F' },
+  { key: 'cloud', elementId: 'cloud-panel', title: 'Cloud Cover', yTitle: '%', yRange: [0, 100] },
   { key: 'qpf', elementId: 'qpf-panel', title: 'QPF', yTitle: 'inches' },
   { key: 'snow', elementId: 'snow-panel', title: 'Snow', yTitle: 'inches' },
+  { key: 'ice', elementId: 'ice-panel', title: 'Freezing Rain + Sleet', yTitle: 'inches', barmode: 'stack' },
   { key: 'wind', elementId: 'wind-panel', title: 'Wind', yTitle: 'mph' },
 ];
 
@@ -67,10 +69,34 @@ function collectTraces(data, models) {
   };
   const columnExistsAnywhere = (column) =>
     data.some((row) => row[column] !== undefined && row[column] !== null && row[column] !== '');
+  const localFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZoneName: 'short',
+  });
 
-  const addTrace = (model, field, panel, options = {}) => {
+  const resolveField = (model, field, fallbacks = []) => {
     const column = getField(model, field);
-    if (!columnExistsAnywhere(column)) return;
+    if (columnExistsAnywhere(column)) {
+      return { column, label: field };
+    }
+    for (const fallback of fallbacks) {
+      const fallbackColumn = getField(model, fallback);
+      if (columnExistsAnywhere(fallbackColumn)) {
+        return { column: fallbackColumn, label: fallback };
+      }
+    }
+    return null;
+  };
+
+  const addTrace = (model, field, panel, options = {}, fallbacks = []) => {
+    const resolved = resolveField(model, field, fallbacks);
+    if (!resolved) return;
+    const { column, label } = resolved;
     const { xs, ys } = buildSeries(column);
     if (xs.length === 0) return;
     const type = options.type || 'scatter';
@@ -79,10 +105,11 @@ function collectTraces(data, models) {
     const trace = {
       x: xs,
       y: ys,
-      name: `${model} ${field.replace(/_/g, ' ')}`,
+      name: `${model} ${label.replace(/_/g, ' ')}`,
       type,
       meta: { model, panel },
-      hovertemplate: `${model}: %{y:.2f}<br>%{x|%b %d %H:%MZ}<extra></extra>`,
+      text: xs.map((value) => localFormatter.format(new Date(value))),
+      hovertemplate: `${model}: %{y:.2f}<br>%{text}<extra></extra>`,
     };
     if (type === 'bar') {
       trace.marker = options.marker || { opacity: 0.7 };
@@ -92,21 +119,97 @@ function collectTraces(data, models) {
       trace.line = {
         dash: options.dash || 'solid',
         shape: options.shape || 'linear',
+        color: options.lineColor,
       };
       if (trace.mode.includes('markers')) {
         trace.marker = options.marker || { size: 6 };
       }
     }
+    if (options.fill) {
+      trace.fill = options.fill;
+      trace.fillcolor = options.fillcolor;
+    }
     traces.push(trace);
+  };
+
+  const buildSeriesMap = (column) => {
+    const map = new Map();
+    for (const row of data) {
+      const raw = row[column];
+      if (raw === undefined || raw === null || raw === '') continue;
+      const num = Number(raw);
+      if (!Number.isFinite(num)) continue;
+      map.set(row.valid_time, num);
+    }
+    return map;
+  };
+
+  const addIceComposite = (model) => {
+    const iceFields = ['cip_in', 'bfp_in'];
+    const resolved = iceFields
+      .map((field) => resolveField(model, field))
+      .filter(Boolean);
+    if (!resolved.length) return;
+
+    resolved.forEach((entry, index) => {
+      addTrace(
+        model,
+        entry.label,
+        'ice',
+        { type: 'bar', marker: { opacity: 0.6 }, lineColor: index === 0 ? '#4a90e2' : '#7f8c8d' },
+      );
+    });
+
+    const seriesMaps = resolved.map((entry) => buildSeriesMap(entry.column));
+    const times = Array.from(new Set(seriesMaps.flatMap((map) => Array.from(map.keys())))).sort();
+    if (!times.length) return;
+    const xs = [];
+    const ys = [];
+    let running = 0;
+    times.forEach((time) => {
+      let step = 0;
+      seriesMaps.forEach((map) => {
+        step += map.get(time) || 0;
+      });
+      running += step;
+      xs.push(time);
+      ys.push(running);
+    });
+    traces.push({
+      x: xs,
+      y: ys,
+      name: `${model} ice accum`,
+      type: 'scatter',
+      mode: 'lines',
+      line: { dash: 'dot' },
+      meta: { model, panel: 'ice' },
+      text: xs.map((value) => localFormatter.format(new Date(value))),
+      hovertemplate: `${model}: %{y:.2f}<br>%{text}<extra></extra>`,
+    });
   };
 
   models.forEach((model) => {
     addTrace(model, 'temp_f', 'temp');
     addTrace(model, 'apparent_temp_f', 'temp', { dash: 'dash' });
-    addTrace(model, 'qpf_in', 'qpf', { type: 'bar', marker: { opacity: 0.7 } });
-    addTrace(model, 'snowfall_in', 'snow', { type: 'bar', marker: { opacity: 0.7 } });
-    addTrace(model, 'snow_acc_in', 'snow');
-    addTrace(model, 'wind10m_mph', 'wind');
+    addTrace(model, 'cloud_pct', 'cloud', { fill: 'tozeroy', fillcolor: 'rgba(120, 140, 160, 0.3)' });
+    addTrace(
+      model,
+      'qpf_in',
+      'qpf',
+      { type: 'bar', marker: { opacity: 0.7 } },
+      ['ipf_in'],
+    );
+    addTrace(model, 'qpf_in_accum', 'qpf', { dash: 'dot' }, ['qpf_in']);
+    addTrace(
+      model,
+      'snowfall_in',
+      'snow',
+      { type: 'bar', marker: { opacity: 0.7 } },
+      ['snowsfc_in', 'snow_in_accum'],
+    );
+    addTrace(model, 'snow_acc_in', 'snow', {}, ['snow_in_accum']);
+    addIceComposite(model);
+    addTrace(model, 'wind10m_mph', 'wind', {}, ['gust_mph']);
   });
 
   traces.push({
@@ -127,15 +230,20 @@ function filterTraces(traces, visibility) {
   return traces.filter((trace) => visibility[trace.meta.model] !== false || trace.meta.model === 'FREEZING');
 }
 
-function baseLayout(title, yTitle) {
+function baseLayout(title, yTitle, options = {}) {
+  const yaxis = { title: yTitle };
+  if (options.yRange) {
+    yaxis.range = options.yRange;
+  }
   return {
     title,
     height: 420,
-    yaxis: { title: yTitle },
+    yaxis,
     xaxis: { type: 'date' },
     margin: { t: 40, r: 20, b: 40, l: 55 },
     legend: { orientation: 'h' },
     hovermode: 'x unified',
+    barmode: options.barmode,
   };
 }
 
@@ -143,7 +251,7 @@ function drawPanels(traces, visibility) {
   const filtered = filterTraces(traces, visibility);
   const plots = {};
 
-  PANEL_CONFIG.forEach(({ key, elementId, title, yTitle }) => {
+  PANEL_CONFIG.forEach(({ key, elementId, title, yTitle, yRange, barmode }) => {
     const panelTraces = filtered.filter((trace) => trace.meta.panel === key);
     const element = document.getElementById(elementId);
     console.log(`[panel=${key}] elementId=${elementId} element=`, element, `traces=${panelTraces.length}`);
@@ -152,7 +260,7 @@ function drawPanels(traces, visibility) {
         element,
         [],
         {
-          ...baseLayout(title, yTitle),
+          ...baseLayout(title, yTitle, { yRange, barmode }),
           annotations: [
             {
               text: 'No data columns found for this panel',
@@ -169,7 +277,7 @@ function drawPanels(traces, visibility) {
       );
       return;
     }
-    Plotly.react(element, panelTraces, baseLayout(title, yTitle), { responsive: true });
+    Plotly.react(element, panelTraces, baseLayout(title, yTitle, { yRange, barmode }), { responsive: true });
     plots[key] = element;
   });
 
