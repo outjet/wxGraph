@@ -7,6 +7,105 @@ const PANEL_CONFIG = [
   { key: 'wind', elementId: 'wind-panel', title: 'Wind', yTitle: 'mph' },
 ];
 
+const MODEL_COLORS = {
+  HRRR: '#001219',
+  GFS: '#005F73',
+  RAP: '#0A9396',
+  GEFS: '#94D2BD',
+  NAM: '#E9D8A6',
+  AIGFS: '#CA6702',
+  HGEFS: '#9B2226',
+};
+
+const hexToRgb = (hex) => {
+  const cleaned = hex.replace('#', '');
+  const num = parseInt(cleaned, 16);
+  return {
+    r: (num >> 16) & 255,
+    g: (num >> 8) & 255,
+    b: num & 255,
+  };
+};
+
+const rgbToHex = ({ r, g, b }) =>
+  `#${[r, g, b].map((value) => value.toString(16).padStart(2, '0')).join('')}`;
+
+const rgbToHsl = ({ r, g, b }) => {
+  const rNorm = r / 255;
+  const gNorm = g / 255;
+  const bNorm = b / 255;
+  const max = Math.max(rNorm, gNorm, bNorm);
+  const min = Math.min(rNorm, gNorm, bNorm);
+  const delta = max - min;
+  let h = 0;
+  let s = 0;
+  const l = (max + min) / 2;
+
+  if (delta !== 0) {
+    s = delta / (1 - Math.abs(2 * l - 1));
+    switch (max) {
+      case rNorm:
+        h = ((gNorm - bNorm) / delta) % 6;
+        break;
+      case gNorm:
+        h = (bNorm - rNorm) / delta + 2;
+        break;
+      default:
+        h = (rNorm - gNorm) / delta + 4;
+    }
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+
+  return { h, s, l };
+};
+
+const hslToRgb = ({ h, s, l }) => {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h >= 0 && h < 60) {
+    r = c;
+    g = x;
+  } else if (h < 120) {
+    r = x;
+    g = c;
+  } else if (h < 180) {
+    g = c;
+    b = x;
+  } else if (h < 240) {
+    g = x;
+    b = c;
+  } else if (h < 300) {
+    r = x;
+    b = c;
+  } else {
+    r = c;
+    b = x;
+  }
+  return {
+    r: Math.round((r + m) * 255),
+    g: Math.round((g + m) * 255),
+    b: Math.round((b + m) * 255),
+  };
+};
+
+const lightenHex = (hex, deltaL = 0.18) => {
+  const hsl = rgbToHsl(hexToRgb(hex));
+  const l = Math.min(0.95, hsl.l + deltaL);
+  return rgbToHex(hslToRgb({ ...hsl, l }));
+};
+
+const hexToRgba = (hex, alpha) => {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+const getModelColor = (model) => MODEL_COLORS[model] || '#0A9396';
+
 async function loadData() {
   const response = await fetch('/meteogram_latest.json', { cache: 'no-cache' });
   if (!response.ok) {
@@ -102,6 +201,8 @@ function collectTraces(data, models) {
     const type = options.type || 'scatter';
     const sparsity = xs.length / Math.max(1, data.length);
     const defaultMode = sparsity < 0.75 ? 'lines+markers' : 'lines';
+    const baseColor = options.color || getModelColor(model);
+    const lineColor = options.lineColor || baseColor;
     const trace = {
       x: xs,
       y: ys,
@@ -112,22 +213,24 @@ function collectTraces(data, models) {
       hovertemplate: `${model}: %{y:.2f}<br>%{text}<extra></extra>`,
     };
     if (type === 'bar') {
-      trace.marker = options.marker || { opacity: 0.7 };
+      const marker = options.marker || { opacity: 0.7 };
+      trace.marker = { color: baseColor, ...marker };
     } else {
       trace.mode = options.mode || defaultMode;
       trace.connectgaps = options.connectgaps ?? false;
       trace.line = {
         dash: options.dash || 'solid',
         shape: options.shape || 'linear',
-        color: options.lineColor,
+        color: lineColor,
       };
       if (trace.mode.includes('markers')) {
-        trace.marker = options.marker || { size: 6 };
+        const marker = options.marker || { size: 6 };
+        trace.marker = { color: lineColor, ...marker };
       }
     }
     if (options.fill) {
       trace.fill = options.fill;
-      trace.fillcolor = options.fillcolor;
+      trace.fillcolor = options.fillcolor || hexToRgba(baseColor, 0.25);
     }
     traces.push(trace);
   };
@@ -151,12 +254,14 @@ function collectTraces(data, models) {
       .filter(Boolean);
     if (!resolved.length) return;
 
+    const baseColor = getModelColor(model);
     resolved.forEach((entry, index) => {
+      const color = index === 0 ? baseColor : lightenHex(baseColor, 0.12);
       addTrace(
         model,
         entry.label,
         'ice',
-        { type: 'bar', marker: { opacity: 0.6 }, lineColor: index === 0 ? '#4a90e2' : '#7f8c8d' },
+        { type: 'bar', marker: { opacity: 0.6, color } },
       );
     });
 
@@ -181,7 +286,7 @@ function collectTraces(data, models) {
       name: `${model} ice accum`,
       type: 'scatter',
       mode: 'lines',
-      line: { dash: 'dot' },
+      line: { dash: 'dot', color: baseColor },
       meta: { model, panel: 'ice' },
       text: xs.map((value) => localFormatter.format(new Date(value))),
       hovertemplate: `${model}: %{y:.2f}<br>%{text}<extra></extra>`,
@@ -190,8 +295,9 @@ function collectTraces(data, models) {
 
   models.forEach((model) => {
     addTrace(model, 'temp_f', 'temp');
-    addTrace(model, 'apparent_temp_f', 'temp', { dash: 'dash' });
-    addTrace(model, 'cloud_pct', 'cloud', { fill: 'tozeroy', fillcolor: 'rgba(120, 140, 160, 0.3)' });
+    const tempLight = lightenHex(getModelColor(model), 0.18);
+    addTrace(model, 'apparent_temp_f', 'temp', { dash: 'dash', lineColor: tempLight });
+    addTrace(model, 'cloud_pct', 'cloud', { fill: 'tozeroy' });
     addTrace(
       model,
       'qpf_in',
