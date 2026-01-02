@@ -16,6 +16,7 @@ const MODEL_COLORS = {
   AIGFS: '#CA6702',
   HGEFS: '#9B2226',
 };
+const MODEL_ORDER = ['HRRR', 'GFS', 'RAP', 'NAM', 'GEFS', 'AIGFS', 'HGEFS'];
 
 const hexToRgb = (hex) => {
   const cleaned = hex.replace('#', '');
@@ -114,25 +115,64 @@ async function loadData() {
   return response.json();
 }
 
-function extractModels(record) {
+function extractModels(data) {
   const models = new Set();
-  Object.keys(record).forEach((key) => {
-    if (key === 'valid_time') return;
-    const [model] = key.split('_');
-    if (model) {
-      models.add(model);
+  const sourceModels = new Set();
+  data.forEach((row) => {
+    if (row.source_model) {
+      sourceModels.add(String(row.source_model).toUpperCase());
     }
   });
-  return Array.from(models).sort();
+  if (sourceModels.size) {
+    sourceModels.forEach((model) => models.add(model));
+  } else if (data.length) {
+    Object.keys(data[0]).forEach((key) => {
+      if (key === 'valid_time') return;
+      const [model] = key.split('_');
+      const upper = model ? model.toUpperCase() : '';
+      if (MODEL_ORDER.includes(upper)) {
+        models.add(upper);
+      }
+    });
+  }
+  const ordered = MODEL_ORDER.filter((model) => models.has(model));
+  const extras = Array.from(models).filter((model) => !MODEL_ORDER.includes(model)).sort();
+  return [...ordered, ...extras];
 }
 
-function buildControls(models, onToggle) {
+function buildControls(models, handlers) {
   const controls = document.getElementById('controls');
   controls.innerHTML = '';
-  const title = document.createElement('strong');
-  title.textContent = 'Models:';
-  controls.appendChild(title);
+  const header = document.createElement('div');
+  header.className = 'controls-header';
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'controls-title';
+  const title = document.createElement('h2');
+  title.textContent = 'Models';
+  const count = document.createElement('span');
+  count.textContent = `${models.length} available`;
+  titleWrap.appendChild(title);
+  titleWrap.appendChild(count);
+  header.appendChild(titleWrap);
 
+  const actions = document.createElement('div');
+  actions.className = 'controls-actions';
+  const selectAll = document.createElement('button');
+  selectAll.type = 'button';
+  selectAll.className = 'control-btn';
+  selectAll.textContent = 'Select all';
+  const clearAll = document.createElement('button');
+  clearAll.type = 'button';
+  clearAll.className = 'control-btn';
+  clearAll.textContent = 'Clear all';
+  actions.appendChild(selectAll);
+  actions.appendChild(clearAll);
+  header.appendChild(actions);
+  controls.appendChild(header);
+
+  const list = document.createElement('div');
+  list.className = 'model-list';
+  const checkboxes = [];
   models.forEach((model) => {
     const label = document.createElement('label');
     label.className = 'model-toggle';
@@ -140,11 +180,26 @@ function buildControls(models, onToggle) {
     checkbox.type = 'checkbox';
     checkbox.checked = true;
     checkbox.dataset.model = model;
-    checkbox.addEventListener('change', () => onToggle(model, checkbox.checked));
+    checkbox.addEventListener('change', () => handlers.onToggle(model, checkbox.checked));
+    const swatch = document.createElement('span');
+    swatch.className = 'model-swatch';
+    swatch.style.background = getModelColor(model);
     label.appendChild(checkbox);
+    label.appendChild(swatch);
     label.appendChild(document.createTextNode(model));
-    controls.appendChild(label);
+    list.appendChild(label);
+    checkboxes.push(checkbox);
   });
+  controls.appendChild(list);
+
+  const bulkUpdate = (value) => {
+    checkboxes.forEach((checkbox) => {
+      checkbox.checked = value;
+    });
+    handlers.onBulkToggle(value);
+  };
+  selectAll.addEventListener('click', () => bulkUpdate(true));
+  clearAll.addEventListener('click', () => bulkUpdate(false));
 }
 
 function collectTraces(data, models) {
@@ -414,7 +469,7 @@ async function init() {
     if (!data.length) {
       throw new Error('No meteogram data available');
     }
-    const models = extractModels(data[0]);
+    const models = extractModels(data);
     if (!models.length) {
       throw new Error('No model columns detected in meteogram JSON.');
     }
@@ -423,9 +478,17 @@ async function init() {
     const visibility = Object.fromEntries(models.map((model) => [model, true]));
 
     const update = () => drawPanels(traces, visibility);
-    buildControls(models, (model, visible) => {
-      visibility[model] = visible;
-      update();
+    buildControls(models, {
+      onToggle: (model, visible) => {
+        visibility[model] = visible;
+        update();
+      },
+      onBulkToggle: (visible) => {
+        models.forEach((model) => {
+          visibility[model] = visible;
+        });
+        update();
+      },
     });
 
     update();

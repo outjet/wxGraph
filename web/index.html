@@ -2,19 +2,38 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Meteogram</title>
+  <title>wxGraph Meteogram</title>
   <script src="https://cdn.plot.ly/plotly-2.31.1.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Spectral:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div id="controls"></div>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-mark">WX</div>
+      <div>
+        <h1>wxGraph</h1>
+        <p>Point forecast meteograms with icing heuristics and alerting.</p>
+      </div>
+    </div>
+    <div class="header-meta">
+      <span class="meta-chip">Local time</span>
+      <span class="meta-chip">America/New_York</span>
+    </div>
+  </header>
 
-  <div id="temp-panel" class="panel"></div>
-  <div id="cloud-panel" class="panel"></div>
-  <div id="qpf-panel" class="panel"></div>
-  <div id="snow-panel" class="panel"></div>
-  <div id="ice-panel" class="panel"></div>
-  <div id="wind-panel" class="panel"></div>
+  <section id="controls" class="controls"></section>
+
+  <main class="panel-grid">
+    <div id="temp-panel" class="panel"></div>
+    <div id="cloud-panel" class="panel"></div>
+    <div id="qpf-panel" class="panel"></div>
+    <div id="snow-panel" class="panel"></div>
+    <div id="ice-panel" class="panel"></div>
+    <div id="wind-panel" class="panel"></div>
+  </main>
 
   <script src="app.js"></script>
 </body>

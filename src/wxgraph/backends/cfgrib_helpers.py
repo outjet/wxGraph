@@ -171,6 +171,16 @@ def extract_surface_record(
     pt_2m = open_point_dataset(path, lat, lon, {"typeOfLevel": "heightAboveGround", "level": 2})
     pt_10m = open_point_dataset(path, lat, lon, {"typeOfLevel": "heightAboveGround", "level": 10})
     pt_mean_sea = open_point_dataset(path, lat, lon, {"typeOfLevel": "meanSea"})
+    pt_atmos = None
+    pt_entire_atm = None
+    try:
+        pt_atmos = open_point_dataset(path, lat, lon, {"typeOfLevel": "atmosphere"})
+    except (DatasetBuildError, KeyError):
+        logger.debug("Atmosphere cloud cover missing for %s", path)
+    try:
+        pt_entire_atm = open_point_dataset(path, lat, lon, {"typeOfLevel": "entireAtmosphere"})
+    except (DatasetBuildError, KeyError):
+        logger.debug("Entire-atmosphere cloud cover missing for %s", path)
 
     def select_from_points(points: list[xr.Dataset | None], candidates: Iterable[str]):
         for pt in points:
@@ -256,6 +266,22 @@ def extract_surface_record(
     except KeyError:
         logger.debug("Pressure variables missing for %s", path)
 
+    cloud_pct = np.nan
+    try:
+        cloud = select_from_points(
+            [pt_surface_inst, pt_entire_atm, pt_atmos, pt_mean_sea],
+            ["TCDC_entireatmosphere", "TCDC", "tcc", "TCC", "CLCT"],
+        )
+        cloud_val = float(cloud.values)
+        if not np.isnan(cloud_val):
+            if 0.0 <= cloud_val <= 1.0:
+                cloud_pct = cloud_val * 100.0
+            else:
+                cloud_pct = cloud_val
+            cloud_pct = float(np.clip(cloud_pct, 0.0, 100.0))
+    except KeyError:
+        logger.debug("Cloud cover variables missing for %s", path)
+
     snowfall_native_in = np.nan
     snow_depth_native_in = np.nan
     try:
@@ -299,5 +325,6 @@ def extract_surface_record(
         "v10m_ms": v,
         "gust_mph": gust_mph,
         "mslp_hpa": mslp,
+        "cloud_pct": cloud_pct,
         "spfh_2m": spfh_val,
     }
