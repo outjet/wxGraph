@@ -42,9 +42,40 @@ def ensure_dir(path: Path) -> Path:
 DEFAULT_LAT = float(os.environ.get("WXGRAPH_LAT", "41.48"))
 DEFAULT_LON = float(os.environ.get("WXGRAPH_LON", "-81.81"))
 DEFAULT_LOCATION_LABEL = os.environ.get("WXGRAPH_SITE", "Point")
-DEFAULT_FHOURS = tuple(range(0, 169, 3))
 DEFAULT_SNOW_RATIO = os.environ.get("WXGRAPH_SNOW_RATIO", "10to1").strip().lower()
 DEFAULT_BLEND_PERIODS = int(os.environ.get("WXGRAPH_BLEND_PERIODS", "0"))
+
+
+def _parse_forecast_hours(value: str) -> Sequence[int]:
+    hours: list[int] = []
+    for fragment in value.split(","):
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+        if ":" in fragment and "-" in fragment:
+            range_part, step_part = fragment.split(":")
+            start, end = [int(x) for x in range_part.split("-", 1)]
+            step = int(step_part)
+            hours.extend(range(start, end + 1, step))
+        elif "-" in fragment:
+            start, end = [int(x) for x in fragment.split("-", 1)]
+            hours.extend(range(start, end + 1))
+        else:
+            hours.append(int(fragment))
+    return sorted(set(hours))
+
+
+def get_default_fhours() -> tuple[int, ...]:
+    """Return forecast hours from WXGRAPH_FHOURS or the standard 3-hour grid."""
+
+    value = os.environ.get("WXGRAPH_FHOURS")
+    if not value:
+        return tuple(range(0, 169, 3))
+    parsed = _parse_forecast_hours(value)
+    return tuple(parsed) if parsed else tuple(range(0, 169, 3))
+
+
+DEFAULT_FHOURS = get_default_fhours()
 
 
 def get_models(defaults: Iterable[str]) -> list[str]:
