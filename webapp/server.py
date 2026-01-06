@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
@@ -16,12 +17,13 @@ for candidate in (BASE_DIR / "src", BASE_DIR):
         sys.path.insert(0, str(candidate))
 
 from gfs_meteogram_kcle import choose_default_cycle, find_latest_available_gfs_run, get_nomads_utc_now
-from wxgraph.backends.nomads_backend import NomadsBackend
+from wxgraph.backends.routed_backend import RoutedBackend
 from wxgraph.config import (
     DEFAULT_FHOURS,
     DEFAULT_LAT,
     DEFAULT_LOCATION_LABEL,
     DEFAULT_LON,
+    get_herbie_models,
     get_output_dir,
     get_work_dir,
 )
@@ -129,6 +131,7 @@ def _determine_latest_run() -> tuple[date, int]:
 
 def _run_meteogram(run_date: date, cycle: int) -> None:
     with RUN_LOCK:
+        download_latest_from_gcs(get_output_dir())
         runner = MeteogramRunner(
             run_date=run_date,
             cycle=cycle,
@@ -138,7 +141,7 @@ def _run_meteogram(run_date: date, cycle: int) -> None:
             work_dir=get_work_dir(),
             output_dir=get_output_dir(),
             location_label=DEFAULT_LOCATION_LABEL,
-            backend=NomadsBackend(),
+            backend=RoutedBackend(get_herbie_models()),
         )
         runner.run()
         upload_latest_to_gcs(get_output_dir())
@@ -172,6 +175,18 @@ async def trigger_run(request: Request, background_tasks: BackgroundTasks):
         run_date, cycle = _determine_latest_run()
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    sync_mode = os.environ.get("WXGRAPH_RUN_SYNC", "").strip().lower() in {"1", "true", "yes", "on"}
+    if sync_mode:
+        try:
+            await run_in_threadpool(_run_meteogram, run_date, cycle)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Run failed: {exc}") from exc
+        return {
+            "status": "completed",
+            "detail": f"Completed run {run_date:%Y-%m-%d} t{cycle:02d}z",
+            "run_date": run_date.strftime("%Y%m%d"),
+            "cycle": cycle,
+        }
     background_tasks.add_task(_run_meteogram, run_date, cycle)
     return {
         "status": "accepted",

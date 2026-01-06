@@ -18,7 +18,7 @@ COPY web /app/web
 COPY webapp /app/webapp
 COPY gfs_meteogram_kcle.py /app/
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir .[herbie]
 RUN mkdir -p /tmp/wxgraph/output /tmp/wxgraph/work
 
 EXPOSE 8080
