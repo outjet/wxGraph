@@ -20,6 +20,7 @@ from wxgraph.config import (
     DEFAULT_LOCATION_LABEL,
     DEFAULT_LON,
     get_blend_periods,
+    get_model_fhours,
     get_models as get_default_models,
     get_output_dir,
     get_work_dir,
@@ -90,6 +91,7 @@ class MeteogramRunner:
         self.run_date = run_date
         self.cycle = cycle
         self.fhours = tuple(fhours or DEFAULT_FHOURS)
+        self.fhours_by_model = get_model_fhours()
         self.work_dir = Path(work_dir or get_work_dir())
         self.output_dir = Path(output_dir or get_output_dir())
         self.location_label = location_label
@@ -117,12 +119,13 @@ class MeteogramRunner:
             model_cls = MODEL_CLASSES.get(model_key)
             if model_cls is None:
                 raise ValueError(f"Unsupported model key: {model_key}")
+            model_fhours = self.fhours_by_model.get(model_key, self.fhours)
             model = model_cls(
                 run_date=self.run_date,
                 cycle=self.cycle,
                 lat=self.lat,
                 lon=self.lon,
-                fhours=self.fhours,
+                fhours=model_fhours,
                 work_dir=self.work_dir / model_key,
             )
             missing_fhours: list[int] = []

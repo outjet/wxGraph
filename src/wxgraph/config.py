@@ -78,6 +78,34 @@ def get_default_fhours() -> tuple[int, ...]:
 DEFAULT_FHOURS = get_default_fhours()
 
 
+def get_model_fhours() -> dict[str, tuple[int, ...]]:
+    """Return per-model forecast hours from WXGRAPH_MODEL_FHOURS."""
+
+    raw = os.environ.get("WXGRAPH_MODEL_FHOURS", "").strip()
+    if not raw:
+        return {}
+    results: dict[str, tuple[int, ...]] = {}
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        model, hours = entry.split("=", 1)
+        model = model.strip().lower()
+        parsed = _parse_forecast_hours(hours)
+        if model and parsed:
+            results[model] = tuple(parsed)
+    return results
+
+
+def get_herbie_models() -> set[str]:
+    """Return models that should use Herbie downloads."""
+
+    raw = os.environ.get("WXGRAPH_HERBIE_MODELS", "").strip()
+    if not raw:
+        return set()
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
 def get_models(defaults: Iterable[str]) -> list[str]:
     """Return the ordered list of models to use."""
 

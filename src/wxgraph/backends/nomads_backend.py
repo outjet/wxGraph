@@ -98,6 +98,9 @@ def _download_grib(url: str, path: Path, *, no_cache: bool) -> None:
 
     response = requests.get(url, timeout=120)
     response.raise_for_status()
+    if not response.content.startswith(b"GRIB"):
+        response.status_code = 404
+        raise requests.HTTPError("Invalid GRIB payload", response=response)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_bytes(response.content)
     tmp_path.replace(path)
